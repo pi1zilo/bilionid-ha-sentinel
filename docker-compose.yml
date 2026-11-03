@@ -1,0 +1,32 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bilionid-ha-sentinel:latest
+    container_name: bilionid-ha-sentinel
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # Expose HA endpoint for inter-node communication over Tailscale
+      - "${HA_PORT:-29010}:${HA_PORT:-29010}"
+    volumes:
+      - ./data:/app/data
+      # Docker socket mount for container state monitoring
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os, sys, urllib.request; port = os.environ.get('HA_PORT', '29010'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health').getcode() == 200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

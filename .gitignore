@@ -1,0 +1,65 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.env.backup*
+*.secret
+*.key
+*.pem
+*.cert
+*.crt
+
+# Telegram sessions & auth keys (CRITICAL SECURITY)
+*.session
+*.session-journal
+session/
+sessions/
+
+# Python & Virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# Data & Database
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite3-journal
+
+# Logs
+*.log
+logs/
+
+# Archives & Backups
+*.tar.gz
+*.tgz
+*.zip
+*.bak
+*.backup
+*.old
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE & Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
