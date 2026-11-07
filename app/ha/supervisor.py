@@ -50,11 +50,13 @@ class HASupervisor:
         self.running = False
         self._loop_task: Optional[asyncio.Task] = None
         self._background_tasks: set = set()
+        self._session: Optional[aiohttp.ClientSession] = None
 
         self.peer_health = PeerHealth(
             peer_name=settings.PEER_NODE_NAME,
             peer_ip=settings.PEER_TAILSCALE_IP,
         )
+        self._peer_down_alert_sent = False
 
         # HTTP Server for HA
         self.http_server = HAHttpServer(
@@ -91,6 +93,8 @@ class HASupervisor:
     async def start(self) -> None:
         """Starts HA HTTP server and main supervisor loop."""
         self.running = True
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
         await self.storage.init_db()
         await self.http_server.start()
 
@@ -124,6 +128,13 @@ class HASupervisor:
                 details="Standby node started. Monitoring primary health.",
             )
             logger.info("Backup node initialized in STANDBY (polling disabled)")
+            msg = (
+                "⚪ **РЕЗЕРВНЫЙ СЕРВЕР ЗАПУЩЕН (STANDBY)**\n\n"
+                f"✅ Узел **{self.settings.NODE_NAME}** ({self.settings.TAILSCALE_IP}) успешно стартовал в режиме ожидания.\n"
+                f"📡 Мониторинг Primary (**{self.settings.PEER_NODE_NAME}**).\n"
+                "🛡️ Автоматический перехват управления (Failover) активен."
+            )
+            await self._notify(msg)
 
         self._loop_task = asyncio.create_task(self._supervisor_loop())
         logger.info("HA Supervisor background loop started for role %s", self.role.value)
@@ -149,6 +160,9 @@ class HASupervisor:
         await self._stop_polling()
         await self.storage.release_lease(self.settings.NODE_NAME)
         await self.http_server.stop()
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
         logger.info("HA Supervisor stopped cleanly")
 
     async def _start_polling(self) -> None:
@@ -193,6 +207,41 @@ class HASupervisor:
         # Probe Backup node
         await self._probe_peer()
 
+        # Check Backup node reachability transitions
+        if not self.peer_health.is_reachable:
+            if self.peer_health.consecutive_failures >= 2 and not self._peer_down_alert_sent:
+                self._peer_down_alert_sent = True
+                msg = (
+                    "🚨 **АВАРИЯ: РЕЗЕРВНЫЙ СЕРВЕР НЕДОСТУПЕН**\n\n"
+                    f"⚠️ Резервный узел **{self.settings.PEER_NODE_NAME}** ({self.settings.PEER_TAILSCALE_IP}) перестал отвечать на запросы.\n"
+                    f"⏱️ Недоступен: более {self.peer_health.consecutive_failures * self.settings.HA_HEARTBEAT_INTERVAL_SEC} сек.\n"
+                    "⚠️ Внимание: отказоустойчивость кластера снижена (нет активного резерва)!"
+                )
+                await self._notify(msg)
+                logger.warning("🚨 Dispatched Telegram alert: Peer %s unreachable", self.settings.PEER_NODE_NAME)
+                await self.storage.record_ha_event(
+                    event_type="PEER_UNREACHABLE",
+                    source_node=self.settings.NODE_NAME,
+                    target_node=self.settings.PEER_NODE_NAME,
+                    details=f"Backup node unreachable after {self.peer_health.consecutive_failures} failed checks.",
+                )
+        else:
+            if self.peer_health.consecutive_successes >= 2 and self._peer_down_alert_sent:
+                self._peer_down_alert_sent = False
+                msg = (
+                    "🟢 **ВОССТАНОВЛЕНИЕ: РЕЗЕРВНЫЙ СЕРВЕР В СЕТИ**\n\n"
+                    f"✅ Резервный узел **{self.settings.PEER_NODE_NAME}** ({self.settings.PEER_TAILSCALE_IP}) снова в сети и отвечает на healthcheck.\n"
+                    "🛡️ Отказоустойчивость кластера полностью восстановлена."
+                )
+                await self._notify(msg)
+                logger.info("🟢 Dispatched Telegram alert: Peer %s recovered", self.settings.PEER_NODE_NAME)
+                await self.storage.record_ha_event(
+                    event_type="PEER_RECOVERED",
+                    source_node=self.settings.NODE_NAME,
+                    target_node=self.settings.PEER_NODE_NAME,
+                    details="Backup node restored and continuously healthy.",
+                )
+
         # Send heartbeat to peer
         await self._send_heartbeat()
 
@@ -235,15 +284,19 @@ class HASupervisor:
         ha_ok = False
         beszel_ok = False
 
-        # 1. HA Endpoint Probe
+        session = self._session
+        own_session = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession()
+            own_session = True
+
         try:
             timeout = aiohttp.ClientTimeout(total=3.0)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(peer_url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("status") == "ok":
-                            ha_ok = True
+            async with session.get(peer_url, timeout=timeout) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("status") == "ok":
+                        ha_ok = True
         except Exception as e:
             self.peer_health.last_error = f"HA endpoint error: {e}"
 
@@ -251,14 +304,16 @@ class HASupervisor:
         if self.role == NodeRole.STANDBY:
             try:
                 timeout = aiohttp.ClientTimeout(total=3.0)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(
-                        f"{self.settings.BESZEL_MAIN_URL}/api/health"
-                    ) as resp:
-                        if resp.status == 200:
-                            beszel_ok = True
+                async with session.get(
+                    f"{self.settings.BESZEL_MAIN_URL}/api/health", timeout=timeout
+                ) as resp:
+                    if resp.status == 200:
+                        beszel_ok = True
             except Exception:
                 beszel_ok = False
+
+        if own_session and not session.closed:
+            await session.close()
 
         self.peer_health.ha_endpoint_ok = ha_ok
         self.peer_health.beszel_hub_ok = beszel_ok
@@ -284,26 +339,40 @@ class HASupervisor:
             "role": self.role.value,
             "state": self.state.value,
         }
+        session = self._session
+        own_session = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession()
+            own_session = True
         try:
             timeout = aiohttp.ClientTimeout(total=2.0)
-            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                async with session.post(peer_url, json=payload):
-                    pass
+            async with session.post(peer_url, json=payload, headers=headers, timeout=timeout):
+                pass
         except Exception:
             pass
+        finally:
+            if own_session and not session.closed:
+                await session.close()
 
     async def _send_yield_to_peer(self) -> None:
         """Signals peer to yield polling to Primary."""
         peer_url = f"{self.settings.peer_ha_url}/ha/yield"
         headers = {"X-HA-Secret": self.settings.HA_SECRET_KEY}
+        session = self._session
+        own_session = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession()
+            own_session = True
         try:
             timeout = aiohttp.ClientTimeout(total=3.0)
-            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                async with session.post(peer_url) as resp:
-                    if resp.status == 200:
-                        logger.info("Successfully sent yield signal to %s", self.settings.PEER_NODE_NAME)
+            async with session.post(peer_url, headers=headers, timeout=timeout) as resp:
+                if resp.status == 200:
+                    logger.info("Successfully sent yield signal to %s", self.settings.PEER_NODE_NAME)
         except Exception as e:
             logger.debug("Yield signal to peer skipped or unreachable: %s", e)
+        finally:
+            if own_session and not session.closed:
+                await session.close()
 
     async def _evaluate_and_execute_takeover(self) -> None:
         """
@@ -454,13 +523,21 @@ class HASupervisor:
 
     async def _check_external_connectivity(self) -> bool:
         """Probes public Telegram API to ensure outbound internet works."""
+        session = self._session
+        own_session = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession()
+            own_session = True
         try:
             timeout = aiohttp.ClientTimeout(total=4.0)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get("https://api.telegram.org", timeout=timeout) as resp:
-                    return resp.status in (200, 302, 404, 400)
+            proxy = self.settings.TELEGRAM_PROXY_URL
+            async with session.get("https://api.telegram.org", timeout=timeout, proxy=proxy) as resp:
+                return resp.status in (200, 302, 404, 400)
         except Exception:
             return False
+        finally:
+            if own_session and not session.closed:
+                await session.close()
 
     async def _notify(self, message: str) -> None:
         if self.send_alert:

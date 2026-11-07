@@ -89,6 +89,10 @@ class Settings(BaseSettings):
         default="",
         description="Telegram Bot API Token"
     )
+    TELEGRAM_PROXY_URL: Optional[str] = Field(
+        default=None,
+        description="Optional HTTP/HTTPS proxy URL for Telegram Bot API (e.g. http://192.168.10.100:10809)"
+    )
     TELEGRAM_CHAT_ID: int = Field(
         default=0,
         description="Telegram Chat ID for operational alerts"

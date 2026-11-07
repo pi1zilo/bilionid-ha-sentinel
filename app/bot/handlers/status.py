@@ -7,6 +7,7 @@ from aiogram import Router, types
 from aiogram.filters import Command
 
 from app.bot.formatters import format_infrastructure_status, format_server_card
+from app.bot.handlers import safe_edit_message
 from app.bot.keyboards.inline import server_detail_keyboard, servers_keyboard
 from app.ha.supervisor import HASupervisor
 from app.monitoring.collector import MetricsCollector
@@ -75,8 +76,7 @@ async def cb_servers(
         collector.get_uptime_kuma(),
     )
     text = format_infrastructure_status(servers, uptime_overview, ha_supervisor)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=servers_keyboard(), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=servers_keyboard(), parse_mode="Markdown")
     await callback.answer()
 
 
@@ -93,8 +93,7 @@ async def cb_server_detail(
         return
 
     text = format_server_card(server)
-    if callback.message:
-        await callback.message.edit_text(
-            text, reply_markup=server_detail_keyboard(server_key), parse_mode="Markdown"
-        )
+    await safe_edit_message(
+        callback, text, reply_markup=server_detail_keyboard(server_key), parse_mode="Markdown"
+    )
     await callback.answer()

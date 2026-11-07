@@ -6,6 +6,7 @@ from aiogram import Router, types
 from aiogram.filters import Command
 
 from app.bot.formatters import format_containers_view
+from app.bot.handlers import safe_edit_message
 from app.bot.keyboards.inline import back_to_menu_keyboard
 from app.monitoring.collector import MetricsCollector
 
@@ -23,8 +24,7 @@ async def cmd_containers(message: types.Message, collector: MetricsCollector) ->
 async def cb_containers(callback: types.CallbackQuery, collector: MetricsCollector) -> None:
     containers = await collector.get_all_containers()
     text = format_containers_view(containers, collector.containers_errors)
-    if callback.message:
-        await callback.message.edit_text(
-            text, reply_markup=back_to_menu_keyboard("nav_containers"), parse_mode="Markdown"
-        )
+    await safe_edit_message(
+        callback, text, reply_markup=back_to_menu_keyboard("nav_containers"), parse_mode="Markdown"
+    )
     await callback.answer()

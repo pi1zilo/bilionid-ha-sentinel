@@ -155,8 +155,9 @@ def format_ha_status(ha_supervisor: HASupervisor, lease_info: Optional[Dict[str,
 def format_containers_view(
     containers_by_server: Dict[str, List[ContainerInfo]],
     server_errors: Optional[Dict[str, str]] = None,
+    max_length: int = 3800,
 ) -> str:
-    """Formats Docker containers report across servers."""
+    """Formats Docker containers report across servers with length limit and markdown safety."""
     lines = ["🐳 **DOCKER КОНТЕЙНЕРЫ**", ""]
     errors = server_errors or {}
 
@@ -164,14 +165,20 @@ def format_containers_view(
         if c_list:
             running = sum(1 for c in c_list if c.state == "running")
             lines.append(f"🖥 **{s_name}** ({running}/{len(c_list)} работают):")
-            for c in c_list:
+            for idx, c in enumerate(c_list):
+                current_len = sum(len(l) + 1 for l in lines)
+                if current_len > max_length:
+                    remaining = len(c_list) - idx
+                    lines.append(f"  _... и ещё {remaining} контейнеров_")
+                    break
+
                 status_icon = "🟢" if c.state == "running" else "🔴"
-                health_str = f" [{c.health}]" if c.health else ""
-                lines.append(f"  {status_icon} `{c.name}` ({c.image}){health_str}")
+                health_str = f" `[{c.health}]`" if c.health else ""
+                lines.append(f"  {status_icon} `{c.name}` (`{c.image}`){health_str}")
         else:
             err = errors.get(s_name)
             if err:
-                lines.append(f"🖥 **{s_name}**:\n  ⚠️ {err}")
+                lines.append(f"🖥 **{s_name}**:\n  ⚠️ `{err}`")
             else:
                 lines.append(f"🖥 **{s_name}**:\n  _(контейнеры не запущены или узел недоступен)_")
 

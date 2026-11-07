@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.formatters import format_beszel_view, format_uptime_kuma_view
+from app.bot.handlers import safe_edit_message
 from app.bot.keyboards.inline import back_to_menu_keyboard
 from app.monitoring.collector import MetricsCollector
 
@@ -48,8 +49,7 @@ async def cb_monitoring_menu(callback: types.CallbackQuery) -> None:
         "• **Beszel Hubs:** состояние сбора телеметрии обоих VPS\n"
         "• **Uptime Kuma:** состояние сервисов и внешних мониторов"
     )
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=monitoring_menu_keyboard(), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=monitoring_menu_keyboard(), parse_mode="Markdown")
     await callback.answer()
 
 
@@ -57,8 +57,7 @@ async def cb_monitoring_menu(callback: types.CallbackQuery) -> None:
 async def cb_beszel(callback: types.CallbackQuery, collector: MetricsCollector) -> None:
     status = await collector.get_beszel_status()
     text = format_beszel_view(status)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=back_to_menu_keyboard("nav_beszel"), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=back_to_menu_keyboard("nav_beszel"), parse_mode="Markdown")
     await callback.answer()
 
 
@@ -66,6 +65,5 @@ async def cb_beszel(callback: types.CallbackQuery, collector: MetricsCollector) 
 async def cb_uptime(callback: types.CallbackQuery, collector: MetricsCollector) -> None:
     overview = await collector.get_uptime_kuma()
     text = format_uptime_kuma_view(overview)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=back_to_menu_keyboard("nav_uptime"), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=back_to_menu_keyboard("nav_uptime"), parse_mode="Markdown")
     await callback.answer()

@@ -6,6 +6,7 @@ from aiogram import Router, types
 from aiogram.filters import Command
 
 from app.bot.formatters import format_incidents_view
+from app.bot.handlers import safe_edit_message
 from app.bot.keyboards.inline import back_to_menu_keyboard
 from app.storage.db import Storage
 
@@ -25,6 +26,5 @@ async def cb_alerts(callback: types.CallbackQuery, storage: Storage) -> None:
     events = await storage.get_recent_ha_events(limit=10)
     incidents = await storage.get_recent_incidents(limit=10)
     text = format_incidents_view(events, incidents)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=back_to_menu_keyboard("nav_alerts"), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=back_to_menu_keyboard("nav_alerts"), parse_mode="Markdown")
     await callback.answer()

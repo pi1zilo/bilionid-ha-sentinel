@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
     image: bilionid-ha-sentinel:latest
     container_name: bilionid-ha-sentinel
     restart: unless-stopped
@@ -13,9 +16,8 @@ services:
       - "${HA_PORT:-29010}:${HA_PORT:-29010}"
     volumes:
       - ./data:/app/data
-      # Docker socket mount for container state monitoring
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /etc/timezone:/etc/timezone:ro
+      # Docker socket mount for container state monitoring (read-only for security)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - /etc/localtime:/etc/localtime:ro
     security_opt:
       - no-new-privileges:true

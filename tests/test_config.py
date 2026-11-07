@@ -16,7 +16,7 @@ def test_default_settings():
     assert settings.is_primary is True
     assert settings.is_standby is False
     assert settings.HA_PORT == 29010
-    assert settings.peer_ha_url == "http://100.64.0.2:29010"
+    assert settings.peer_ha_url == f"http://{settings.PEER_TAILSCALE_IP}:29010"
 
 
 def test_standby_settings():

@@ -100,7 +100,14 @@ async def run_app() -> None:
             loop.add_signal_handler(s, lambda s=s: request_shutdown(s.name))
     else:
         # Windows signal handling support
-        pass
+        for s in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(
+                    s,
+                    lambda sig, frame, name=s.name: loop.call_soon_threadsafe(request_shutdown, name),
+                )
+            except Exception:
+                pass
 
     try:
         await stop_event.wait()

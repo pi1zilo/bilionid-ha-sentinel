@@ -5,6 +5,7 @@ Start, help, and main menu handlers.
 from aiogram import Router, types
 from aiogram.filters import Command
 
+from app.bot.handlers import safe_edit_message
 from app.bot.keyboards.inline import main_menu_keyboard
 from app.core.config import Settings
 from app.ha.supervisor import HASupervisor
@@ -71,6 +72,5 @@ async def cb_main_menu(
         f"Текущий узел: `{node_desc}`\n"
         "Выберите раздел:"
     )
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
     await callback.answer()

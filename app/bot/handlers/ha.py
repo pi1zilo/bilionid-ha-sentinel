@@ -6,6 +6,7 @@ from aiogram import Router, types
 from aiogram.filters import Command
 
 from app.bot.formatters import format_ha_status
+from app.bot.handlers import safe_edit_message
 from app.bot.keyboards.inline import ha_keyboard, ha_manual_confirm_keyboard
 from app.core.config import NodeRole, NodeState
 from app.ha.supervisor import HASupervisor
@@ -33,8 +34,7 @@ async def cb_ha(
 ) -> None:
     lease = await storage.get_current_lease()
     text = format_ha_status(ha_supervisor, lease)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=ha_keyboard(), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=ha_keyboard(), parse_mode="Markdown")
     await callback.answer()
 
 
@@ -48,8 +48,7 @@ async def cb_ha_manual_prompt(callback: types.CallbackQuery, ha_supervisor: HASu
         f"Вы действительно хотите **{current_action}** данный узел вручную?\n"
         "Убедитесь, что второй узел не будет конфликтовать."
     )
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=ha_manual_confirm_keyboard(), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=ha_manual_confirm_keyboard(), parse_mode="Markdown")
     await callback.answer()
 
 
@@ -80,6 +79,5 @@ async def cb_ha_force_toggle(
 
     lease = await storage.get_current_lease()
     text = format_ha_status(ha_supervisor, lease) + f"\n\n⚡ *{result_msg}*"
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=ha_keyboard(), parse_mode="Markdown")
+    await safe_edit_message(callback, text, reply_markup=ha_keyboard(), parse_mode="Markdown")
     await callback.answer(result_msg, show_alert=True)
