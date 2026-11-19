@@ -1,0 +1,39 @@
+# Environment & secrets
+.env
+*.env.backup*
+.env.*
+
+# Python & Virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# Data & Database
+data/
+*.db
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE & Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS artifacts
+.DS_Store
+Thumbs.db
