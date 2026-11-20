@@ -1,283 +1,127 @@
-"""
-Message formatters for BilioniD HA Bot.
-Produces clean, compact, professional Markdown reports.
-"""
+"""Plain-text Telegram views for monitoring and diagnostics."""
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from app.ha.supervisor import HASupervisor
 from app.monitoring.models import ContainerInfo, ServerMetrics, UptimeKumaOverview
+from app.services.monitoring import parse_event_time
 
 
-def format_server_card(s: ServerMetrics) -> str:
-    """Formats a single server detailed status matching Section 9 specification."""
-    lines = [
-        f"🖥 **{s.name}**",
-        "",
-        f"Статус: {s.status}",
-        "",
-        "CPU:",
-        f"Загрузка: {s.cpu_percent}%",
-        "",
-        "RAM:",
-        f"Использовано: {s.ram_used_gb} / {s.ram_total_gb} GB",
-        f"Загрузка: {s.ram_percent}%",
-        "",
-        "Диск:",
-        f"Использовано: {s.disk_used_gb} / {s.disk_total_gb} GB",
-        f"Свободно: {s.disk_free_gb} GB",
-        "",
-        "Load Average:",
-        f"1m: {s.load_1m:.2f}",
-        f"5m: {s.load_5m:.2f}",
-        f"15m: {s.load_15m:.2f}",
-        "",
-        "Uptime:",
-        f"{s.uptime_str}",
-        "",
-        "Docker:",
-        f"Контейнеров: {s.docker_containers_total}",
-        f"Работает: {s.docker_containers_running}",
-        f"Остановлено: {s.docker_containers_stopped}",
-    ]
+def format_time(value: str | None, tz_name: str = "Europe/Moscow") -> str:
+    try:
+        parsed = parse_event_time(value)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return "—"
+    return parsed.astimezone(ZoneInfo(tz_name)).strftime("%d.%m %H:%M:%S %Z") if parsed else "—"
 
-    if s.temperature is not None:
-        lines.extend(["", f"Температура: {s.temperature}°C"])
 
-    lines.extend([
-        "",
-        f"Последнее обновление: {s.last_updated or datetime.now(timezone.utc).strftime('%H:%M:%S')}",
-    ])
-
-    if s.error_message:
-        lines.extend(["", f"⚠️ *Примечание:* {s.error_message}"])
-
+def format_server_card(server: ServerMetrics, tz_name: str = "Europe/Moscow") -> str:
+    lines = [f"🖥 {server.name}", f"Статус: {server.status}", f"Источник: {server.source}"]
+    if server.monitor_state not in {"DOWN", "UNKNOWN"}:
+        lines += [f"CPU: {server.cpu_percent}%", f"RAM: {server.ram_percent}%", f"Диск: {server.disk_percent}%"]
+        if server.ram_total_gb:
+            lines.append(f"RAM: {server.ram_used_gb} / {server.ram_total_gb} ГиБ")
+        if server.disk_total_gb:
+            lines.append(f"Диск: {server.disk_used_gb} / {server.disk_total_gb} ГиБ")
+        if server.temperature is not None:
+            lines.append(f"Температура: {server.temperature} °C")
+        lines.append(f"Uptime: {server.uptime_str}")
+    if server.last_updated:
+        lines.append(f"Последние данные: {format_time(server.last_updated, tz_name)}")
     return "\n".join(lines)
 
 
 def format_infrastructure_status(
-    servers: List[ServerMetrics],
-    uptime_overview: UptimeKumaOverview,
-    ha_supervisor: HASupervisor,
+    servers: list[ServerMetrics], kuma: UptimeKumaOverview, supervisor: HASupervisor,
+    delivery: dict | None = None,
 ) -> str:
-    """Formats general overview for /status command."""
-    ha_info = ha_supervisor.get_ha_info()
-    now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
-
-    lines = [
-        "🌐 **ОБЩИЙ СТАТУС ИНФРАСТРУКТУРЫ**",
-        f"⏱ Время проверки: `{now_str}`",
-        "",
-        "🔄 **Состояние HA кластера:**",
-        f"• Текущий узел: `{ha_supervisor.settings.NODE_NAME}` ({ha_supervisor.role.value})",
-        f"• Режим: `{ha_supervisor.state.value}`",
-        f"• Активный Polling: `{'Да' if ha_supervisor.is_polling else 'Нет'}`",
-        f"• Связь со вторым узлом: `{'🟢 Норма' if ha_info.get('peer_reachable') else '🔴 Недоступен'}`",
-        "",
-        "🖥 **Серверы:**",
-    ]
-
+    info = supervisor.get_ha_info()
+    lines = ["🌐 Инфраструктура", f"Узел: {info['node_name']} · {info['state']}", "", "🖥 Серверы"]
     if not servers:
-        lines.append("• Данные от серверов временно недоступны.")
+        lines.append("Нет данных Beszel.")
+    for server in servers:
+        lines.append(f"• {server.name}: {server.status}")
+    lines += ["", "⏱ Uptime Kuma"]
+    if kuma.available:
+        lines.append(f"Всего {kuma.total_count} · UP {kuma.up_count} · DOWN {kuma.down_count}")
     else:
-        for s in servers:
-            icon = "🟢" if s.is_online else "🔴"
-            lines.append(
-                f"• {icon} **{s.name}**: CPU {s.cpu_percent}% | RAM {s.ram_percent}% ({s.ram_used_gb}/{s.ram_total_gb}G) | Uptime: {s.uptime_str}"
-            )
-
-    lines.extend([
-        "",
-        "📊 **Мониторинг сервисов (Uptime Kuma):**",
-    ])
-    if uptime_overview.available:
-        lines.append(
-            f"• Мониторов: {uptime_overview.total_count} (🟢 Up: {uptime_overview.up_count} | 🔴 Down: {uptime_overview.down_count})"
-        )
-    else:
-        lines.append(f"• {uptime_overview.error_message or 'Не настроен / недоступен'}")
-
+        lines.append(kuma.error_message or "Нет данных.")
+    if delivery and (delivery["pending"] or delivery["failed"]):
+        lines += ["", f"📨 Алерты в очереди: {delivery['pending']} · ошибки доставки: {delivery['failed']}"]
     return "\n".join(lines)
 
 
-def format_ha_status(ha_supervisor: HASupervisor, lease_info: Optional[Dict[str, Any]]) -> str:
-    """Formats HA diagnostics view."""
-    ha_info = ha_supervisor.get_ha_info()
-    peer_health = ha_supervisor.peer_health
-
-    role_desc = "PRIMARY (Основной)" if ha_supervisor.role.value == "PRIMARY" else "STANDBY (Резервный)"
-    peer_role_desc = "STANDBY" if ha_supervisor.role.value == "PRIMARY" else "PRIMARY"
-
+def format_ha_status(supervisor: HASupervisor) -> str:
+    info = supervisor.get_ha_info()
+    tz = supervisor.settings.ALERT_TIMEZONE
     lines = [
-        "🔄 **HIGH AVAILABILITY STATUS**",
-        "",
-        f"📍 **Локальный узел:** `{ha_supervisor.settings.NODE_NAME}`",
-        f"• Роль: `{role_desc}`",
-        f"• Состояние FSM: `{ha_supervisor.state.value}`",
-        f"• Telegram Polling: `{'🟢 Активен (Лидер)' if ha_supervisor.is_polling else '⚪ Остановлен (Резерв)'}`",
-        f"• Uptime процесса: `{ha_supervisor.uptime_seconds // 3600}ч {(ha_supervisor.uptime_seconds % 3600) // 60}м`",
-        "",
-        f"🌐 **Связь с пиром ({peer_health.peer_name} — {peer_health.peer_ip}):**",
-        f"• Доступность: `{'🟢 Доступен' if peer_health.is_reachable else '🔴 НЕДОСТУПЕН'}`",
-        f"• HA Endpoint ({ha_supervisor.settings.HA_PORT}): `{'🟢 OK' if peer_health.ha_endpoint_ok else '🔴 Ошибка'}`",
-        f"• Beszel Hub: `{'🟢 OK' if peer_health.beszel_hub_ok else '⚪ Не проверен / Ошибка'}`",
-        f"• Успешных проверок подряд: `{peer_health.consecutive_successes}`",
-        f"• Ошибок подряд: `{peer_health.consecutive_failures}`",
+        "🔄 Состояние HA",
+        f"Узел: {info['node_name']} · {info['role']} · {info['state']}",
+        f"Telegram polling: {'активен' if info['polling_ready'] else 'не готов' if info['polling_enabled'] else 'выключен'}",
+        f"Последний getUpdates: {format_time(info.get('last_poll_ok'), tz)}",
     ]
-
-    if peer_health.last_seen_healthy:
-        lines.append(f"• Последний здоровый ответ: `{peer_health.last_seen_healthy.strftime('%H:%M:%S')} UTC`")
-
-    lines.extend([
-        "",
-        "🔒 **HA Lease (Блокировка лидера):**",
-    ])
-    if lease_info:
-        lines.extend([
-            f"• Текущий владелец: `{lease_info.get('holder_node')}`",
-            f"• Истекает в: `{lease_info.get('expires_at', '')[:19]} UTC`",
-            f"• Статус: `{'Активен' if lease_info.get('is_active') else 'Освобожден'}`",
-        ])
-    else:
-        lines.append("• Данные lease отсутствуют в локальной БД.")
-
-    lines.extend([
-        "",
-        "🛡 **Защита от Split-Brain:**",
-        "• Модель: 2 узла, Heartbeat + Lease timeout + Fencing через Telegram API 409 Conflict.",
-        "• При потере связи Backup перехватывает управление только при истечении lease и подтверждении выхода в Интернет.",
-    ])
-
+    if error := info.get("last_poll_error"):
+        lines.append(f"Последняя ошибка: {error}")
+    if info["peer_configured"]:
+        lines += [
+            "",
+            f"Резервный адрес: {info['peer_name']} · {supervisor.peer_health.peer_ip}",
+            f"HA API: {'доступен' if info['peer_reachable'] else 'нет связи'}",
+            f"Polling второго узла: { {True: 'активен', False: 'выключен или недоступен', None: 'неизвестно'}[info['peer_polling_ready']] }",
+        ]
+    lines += ["", "Переключение выполняется через SSH."]
     return "\n".join(lines)
 
 
-def format_containers_view(containers_by_server: Dict[str, List[ContainerInfo]]) -> str:
-    """Formats Docker containers report across servers."""
-    lines = ["🐳 **DOCKER КОНТЕЙНЕРЫ**", ""]
-
-    total_containers = sum(len(c_list) for c_list in containers_by_server.values())
-    if total_containers == 0:
-        lines.append("Контейнеры не обнаружены или Docker socket не смонтирован.")
-        return "\n".join(lines)
-
-    for s_name, c_list in containers_by_server.items():
-        running = sum(1 for c in c_list if c.state == "running")
-        lines.append(f"🖥 **{s_name}** ({running}/{len(c_list)} работают):")
-
-        if not c_list:
-            lines.append("  _(нет данных или узел недоступен)_")
-        else:
-            for c in c_list:
-                status_icon = "🟢" if c.state == "running" else "🔴"
-                health_str = f" [{c.health}]" if c.health else ""
-                lines.append(f"  {status_icon} `{c.name}` ({c.image}){health_str}")
-
-        lines.append("")
-
-    return "\n".join(lines)
+def format_containers_view(containers_by_server: dict[str, list[ContainerInfo]]) -> str:
+    lines = ["🐳 Контейнеры"]
+    for server, containers in containers_by_server.items():
+        lines += ["", server]
+        if not containers:
+            lines.append("Нет данных Docker.")
+        for container in containers:
+            health = f" · {container.health}" if container.health else ""
+            lines.append(f"• {container.name}: {container.state}{health}")
+    return "\n".join(lines)[:3800]
 
 
-def format_beszel_view(beszel_status: Dict[str, Any]) -> str:
-    """Formats Beszel Hubs health view."""
-    main_st = beszel_status.get("main", {})
-    backup_st = beszel_status.get("backup", {})
-    active = beszel_status.get("active_hub", "Unknown")
-
-    lines = [
-        "📊 **BESZEL MONITORING HUBS**",
-        "",
-        f"🎯 Активный Hub для запросов: `{active}`",
-        "",
-        "1️⃣ **Main Beszel Hub (BilioniD-factories):**",
-        f"• URL: `{main_st.get('url', 'http://100.68.106.100:29001')}`",
-        f"• Доступность: `{'🟢 Онлайн' if main_st.get('available') else '🔴 Недоступен'}`",
-    ]
-    if main_st.get("latency_ms"):
-        lines.append(f"• Задержка: `{main_st.get('latency_ms')} ms`")
-    if main_st.get("error"):
-        lines.append(f"• Ошибка: `{main_st.get('error')}`")
-
-    lines.extend([
-        "",
-        "2️⃣ **Backup Beszel Hub (SUSLIKVPN):**",
-        f"• URL: `{backup_st.get('url', 'http://100.77.242.10:29000')}`",
-        f"• Доступность: `{'🟢 Онлайн' if backup_st.get('available') else '🔴 Недоступен'}`",
-    ])
-    if backup_st.get("latency_ms"):
-        lines.append(f"• Задержка: `{backup_st.get('latency_ms')} ms`")
-    if backup_st.get("error"):
-        lines.append(f"• Ошибка: `{backup_st.get('error')}`")
-
+def format_beszel_view(status: dict) -> str:
+    lines = ["📊 Beszel", f"Основной источник данных: {status.get('active_hub', '—')}"]
+    for key, label in (("main", "Main"), ("backup", "Backup")):
+        hub = status.get(key, {})
+        if hub.get("url"):
+            lines.append(f"• {label}: {'доступен' if hub.get('available') else 'нет связи'}")
     return "\n".join(lines)
 
 
 def format_uptime_kuma_view(overview: UptimeKumaOverview) -> str:
-    """Formats Uptime Kuma monitors view."""
-    lines = [
-        "📊 **UPTIME KUMA МОНИТОРЫ**",
-        "",
-    ]
     if not overview.available:
-        lines.append(f"⚠️ {overview.error_message or 'Uptime Kuma недоступен'}")
-        return "\n".join(lines)
-
-    lines.extend([
-        f"Всего мониторов: **{overview.total_count}** (🟢 Up: {overview.up_count} | 🔴 Down: {overview.down_count})",
-        "",
-    ])
-
-    for m in overview.monitors:
-        icon = "🟢" if m.status == "UP" else ("🔴" if m.status == "DOWN" else "🟡")
-        ping_s = f" ({m.ping_ms} ms)" if m.ping_ms is not None else ""
-        lines.append(f"• {icon} **{m.name}**: `{m.status}`{ping_s}")
-
-    return "\n".join(lines)
+        return overview.error_message or "Нет данных Uptime Kuma."
+    lines = ["⏱ Uptime Kuma", f"Всего {overview.total_count} · UP {overview.up_count} · DOWN {overview.down_count}", ""]
+    for monitor in overview.monitors:
+        latency = f" · {monitor.ping_ms:g} мс" if monitor.ping_ms is not None else ""
+        lines.append(f"• {monitor.name}: {monitor.status}{latency}")
+    return "\n".join(lines)[:3800]
 
 
-def format_incidents_view(ha_events: List[Dict[str, Any]], incidents: List[Dict[str, Any]]) -> str:
-    """Formats recent incidents and HA failover transitions."""
-    lines = [
-        "🚨 **ЖУРНАЛ ИНЦИДЕНТОВ И HA ПЕРЕКЛЮЧЕНИЙ**",
-        "",
-    ]
-
+def format_incidents_view(
+    ha_events: list[dict], incidents: list[dict], tz_name: str = "Europe/Moscow",
+) -> str:
+    lines = ["🚨 Журнал инцидентов"]
     if not ha_events and not incidents:
-        lines.append("Инцидентов и аварийных переключений не зафиксировано. Система стабильна. 🟢")
-        return "\n".join(lines)
-
-    if ha_events:
-        lines.append("**Последние HA события:**")
-        for ev in ha_events[:7]:
-            ts = ev.get("timestamp", "")[:19].replace("T", " ")
-            ev_type = ev.get("event_type", "UNKNOWN")
-            src = ev.get("source_node", "")
-            details = ev.get("details", "")
-            lines.append(f"• `[{ts}]` **{ev_type}** ({src})\n  _{details}_")
-        lines.append("")
-
-    if incidents:
-        lines.append("**Активные инциденты инфраструктуры:**")
-        for inc in incidents[:7]:
-            ts = inc.get("timestamp", "")[:19].replace("T", " ")
-            sev = inc.get("severity", "WARN")
-            msg = inc.get("message", "")
-            srv = inc.get("server", "")
-            lines.append(f"• `[{ts}]` [{sev}] {srv}: {msg}")
-
-    return "\n".join(lines)
+        return f"{lines[0]}\nЗаписей пока нет."
+    for incident in incidents:
+        timestamp = format_time(incident["timestamp"], tz_name)
+        closed = incident.get("resolved_at")
+        state = f"🟢 до {format_time(closed, tz_name)}" if closed else "🔴 открыт"
+        lines.append(f"\n{state} · {incident['category']} · {incident['server']}\nС {timestamp}")
+        if incident["message"]:
+            lines.append(incident["message"][:160])
+    for event in ha_events[:3]:
+        lines.append(f"\n• {format_time(event['timestamp'], tz_name)} · {event['event_type']}")
+    return "\n".join(lines)[:3800]
 
 
-def format_admin_view(ha_supervisor: HASupervisor) -> str:
-    """Formats safe admin/management screen."""
-    return (
-        "⚙️ **УПРАВЛЕНИЕ ИНФРАСТРУКТУРОЙ**\n\n"
-        "🔒 **Текущий режим безопасности:** Безопасный Read-Only мониторинг.\n"
-        "Выполнение произвольных shell-команд заблокировано политикой безопасности.\n\n"
-        f"• Текущий активный узел: `{ha_supervisor.settings.NODE_NAME}`\n"
-        f"• Роль: `{ha_supervisor.role.value}`\n\n"
-        "Доступные действия:\n"
-        "• Принудительное переключение HA роли\n"
-        "• Диагностика и проверка связности Tailscale\n"
-        "• Обновление кэша метрик"
-    )
+def format_admin_view(supervisor: HASupervisor) -> str:
+    return "⚙️ Управление\n\n" + format_ha_status(supervisor)

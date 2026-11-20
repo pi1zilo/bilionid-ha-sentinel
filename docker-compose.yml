@@ -3,29 +3,28 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: bilionid-ha-bot:latest
-    container_name: bilionid-ha-bot
+      args:
+        PYTHON_IMAGE: "${PYTHON_IMAGE:-python:3.11-slim@sha256:65bd3d9f1d7fa268dd1909973ba7eb4bdf41f6dcf2cfbe76ba9528b170f3fd79}"
+    image: "bilionid-ha-bot:${IMAGE_TAG:-dev}"
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     restart: unless-stopped
+    stop_grace_period: 25s
     env_file:
       - .env
     ports:
-      # Expose HA endpoint for inter-node communication over Tailscale
-      - "${HA_PORT:-29010}:${HA_PORT:-29010}"
+      - "${HA_BIND_IP:-127.0.0.1}:${HA_PORT:-29010}:${HA_PORT:-29010}"
     volumes:
       - ./data:/app/data
-      # Read-only Docker socket mount for container state monitoring
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /etc/timezone:/etc/timezone:ro
-      - /etc/localtime:/etc/localtime:ro
     security_opt:
       - no-new-privileges:true
+    cap_drop: [ALL]
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import os, sys, urllib.request; port = os.environ.get('HA_PORT', '29010'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health').getcode() == 200 else 1)\""]
+      test: ["CMD", "python", "-m", "app.core.healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 3

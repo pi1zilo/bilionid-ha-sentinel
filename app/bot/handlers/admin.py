@@ -21,10 +21,10 @@ async def cmd_refresh(
 ) -> None:
     servers = await collector.get_servers(force_refresh=True)
     uptime_overview = await collector.get_uptime_kuma()
-    text = "🔄 **Данные успешно обновлены!**\n\n" + format_infrastructure_status(
+    text = "🔄 Данные успешно обновлены!\n\n" + format_infrastructure_status(
         servers, uptime_overview, ha_supervisor
     )
-    await message.answer(text, reply_markup=servers_keyboard(), parse_mode="Markdown")
+    await message.answer(text, reply_markup=servers_keyboard(), parse_mode=None)
 
 
 @router.callback_query(lambda c: c.data == "nav_refresh")
@@ -35,11 +35,11 @@ async def cb_refresh(
 ) -> None:
     servers = await collector.get_servers(force_refresh=True)
     uptime_overview = await collector.get_uptime_kuma()
-    text = "🔄 **Данные успешно обновлены!**\n\n" + format_infrastructure_status(
+    text = "🔄 Данные успешно обновлены!\n\n" + format_infrastructure_status(
         servers, uptime_overview, ha_supervisor
     )
     if callback.message:
-        await callback.message.edit_text(text, reply_markup=servers_keyboard(), parse_mode="Markdown")
+        await callback.message.edit_text(text, reply_markup=servers_keyboard(), parse_mode=None)
     await callback.answer("Данные обновлены", show_alert=False)
 
 
@@ -50,5 +50,5 @@ async def cb_admin(
 ) -> None:
     text = format_admin_view(ha_supervisor)
     if callback.message:
-        await callback.message.edit_text(text, reply_markup=back_to_menu_keyboard("nav_admin"), parse_mode="Markdown")
+        await callback.message.edit_text(text, reply_markup=back_to_menu_keyboard("nav_admin"), parse_mode=None)
     await callback.answer()

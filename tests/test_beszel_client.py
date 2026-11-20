@@ -39,16 +39,16 @@ def test_beszel_record_parsing():
         "status": "up",
         "info": {
             "cpu": 12.0,
-            "m": 4.2,
-            "mt": 24.0,
             "mp": 17.5,
-            "d": 12.0,
-            "dt": 99.0,
+            "dt": 51.0,
             "dp": 12.1,
-            "l": [0.31, 0.56, 0.50],
+            "la": [0.31, 0.56, 0.50],
             "u": 439200,
-            "c": 10,
-            "cr": 10,
+        },
+        "updated": "2026-11-19 18:00:00.000Z",
+        "_stats": {
+            "created": "2026-11-19 17:59:00.000Z",
+            "stats": {"m": 24, "mu": 4.2, "d": 99, "du": 12},
         },
     }
 
@@ -64,9 +64,8 @@ def test_beszel_record_parsing():
     assert metrics.load_1m == 0.31
     assert metrics.load_5m == 0.56
     assert metrics.load_15m == 0.50
-    assert metrics.docker_containers_total == 10
-    assert metrics.docker_containers_running == 10
-    assert metrics.docker_containers_stopped == 0
+    assert metrics.temperature == 51.0
+    assert metrics.last_updated == "2026-11-19 17:59:00.000Z"
     assert metrics.uptime_str == "5 дней 2 часа"
 
 
@@ -106,3 +105,11 @@ def test_local_fallback_metrics():
     assert metrics.cpu_percent >= 0.0
     assert metrics.ram_total_gb > 0.0
     assert metrics.source == "local_fallback"
+
+
+def test_beszel_summary_does_not_read_temperature_as_disk_capacity():
+    system = {"name": "Main", "status": "up", "info": {"dt": 50, "c": 16}}
+    metric = BeszelClient()._parse_system_record(system)
+    assert metric.temperature == 50
+    assert metric.disk_total_gb == 0
+    assert metric.docker_containers_total == 0

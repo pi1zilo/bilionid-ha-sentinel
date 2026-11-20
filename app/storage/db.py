@@ -3,10 +3,16 @@ Asynchronous SQLite storage for HA states, leases, and incident history.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import aiosqlite
+
+from app.monitoring.events import Observation
+
+
+def utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 class Storage:
@@ -30,15 +36,6 @@ class Storage:
                     );
                 """)
                 await db.execute("""
-                    CREATE TABLE IF NOT EXISTS ha_lease (
-                        id INTEGER PRIMARY KEY CHECK (id = 1),
-                        holder_node TEXT NOT NULL,
-                        acquired_at TEXT NOT NULL,
-                        expires_at TEXT NOT NULL,
-                        is_active INTEGER NOT NULL DEFAULT 1
-                    );
-                """)
-                await db.execute("""
                     CREATE TABLE IF NOT EXISTS incidents (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         timestamp TEXT NOT NULL,
@@ -49,7 +46,127 @@ class Storage:
                         resolved_at TEXT
                     );
                 """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS observations (
+                        source TEXT NOT NULL,
+                        entity_id TEXT NOT NULL,
+                        last_at TEXT NOT NULL,
+                        incident_id INTEGER REFERENCES incidents(id),
+                        PRIMARY KEY (source, entity_id)
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS alert_queue (
+                        id INTEGER PRIMARY KEY,
+                        incident_id INTEGER NOT NULL REFERENCES incidents(id),
+                        kind TEXT NOT NULL CHECK(kind IN ('DOWN', 'UP')),
+                        text TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        retry_at TEXT NOT NULL,
+                        delivered_at TEXT,
+                        failed_at TEXT,
+                        UNIQUE(incident_id, kind)
+                    )
+                """)
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS alert_queue_pending
+                    ON alert_queue(retry_at, id)
+                    WHERE delivered_at IS NULL AND failed_at IS NULL
+                """)
                 await db.commit()
+
+    async def apply_observation(self, observation: Observation, render) -> None:
+        """Apply one ordered observation and enqueue its transition atomically."""
+        seen = observation.observed_at or datetime.now(timezone.utc)
+        event_at = observation.occurred_at or seen
+        timestamp = utc_text(event_at)
+        async with self._lock, aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            key = (observation.source, observation.entity_id)
+            async with db.execute(
+                "SELECT last_at, incident_id FROM observations WHERE source = ? AND entity_id = ?", key
+            ) as cursor:
+                state = await cursor.fetchone()
+            if state is not None and timestamp <= state["last_at"]:
+                return
+
+            open_id = state["incident_id"] if state is not None else None
+            if observation.state == "DOWN" and open_id is None:
+                cursor = await db.execute(
+                    """INSERT INTO incidents (timestamp, category, server, message, severity)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    (timestamp, observation.source, observation.name, observation.detail, observation.severity),
+                )
+                open_id = cursor.lastrowid
+                await db.execute(
+                    "INSERT INTO alert_queue (incident_id, kind, text, retry_at) VALUES (?, 'DOWN', ?, ?)",
+                    (open_id, render(observation, event_at, None), utc_text(seen)),
+                )
+            elif observation.state == "UP" and open_id is not None:
+                async with db.execute("SELECT timestamp FROM incidents WHERE id = ?", (open_id,)) as cursor:
+                    row = await cursor.fetchone()
+                await db.execute("UPDATE incidents SET resolved_at = ? WHERE id = ?", (timestamp, open_id))
+                started = datetime.fromisoformat(row["timestamp"])
+                await db.execute(
+                    "INSERT INTO alert_queue (incident_id, kind, text, retry_at) VALUES (?, 'UP', ?, ?)",
+                    (open_id, render(observation, event_at, started), utc_text(seen)),
+                )
+                open_id = None
+
+            await db.execute(
+                """INSERT INTO observations (source, entity_id, last_at, incident_id) VALUES (?, ?, ?, ?)
+                ON CONFLICT (source, entity_id) DO UPDATE
+                SET last_at = excluded.last_at, incident_id = excluded.incident_id""",
+                (*key, timestamp, open_id),
+            )
+            await db.commit()
+
+    async def next_alert(self) -> Optional[Dict[str, Any]]:
+        async with self._lock, aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT id, text, attempts FROM alert_queue AS alert
+                WHERE alert.delivered_at IS NULL AND alert.failed_at IS NULL AND alert.retry_at <= ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM alert_queue AS earlier WHERE earlier.incident_id = alert.incident_id
+                    AND earlier.id < alert.id AND earlier.delivered_at IS NULL AND earlier.failed_at IS NULL
+                )
+                ORDER BY alert.id LIMIT 1
+            """, (utc_text(datetime.now(timezone.utc)),)) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def open_observation_ids(self, source: str) -> set[str]:
+        async with self._lock, aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT entity_id FROM observations WHERE source = ? AND incident_id IS NOT NULL", (source,)
+            ) as cursor:
+                return {row[0] for row in await cursor.fetchall()}
+
+    async def update_alert_delivery(
+        self, alert_id: int, *, retry_delay: float | None = None, permanent_failure: bool = False
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        delivered_at = utc_text(now) if retry_delay is None and not permanent_failure else None
+        failed_at = utc_text(now) if permanent_failure else None
+        retry_at = utc_text(now + timedelta(seconds=retry_delay or 0))
+        async with self._lock, aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE alert_queue SET attempts = attempts + 1, delivered_at = ?, failed_at = ?, retry_at = ?
+                WHERE id = ?
+            """, (delivered_at, failed_at, retry_at, alert_id))
+            await db.commit()
+
+    async def delivery_counts(self) -> dict[str, int]:
+        async with self._lock, aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT COUNT(*) FILTER (WHERE delivered_at IS NULL AND failed_at IS NULL),
+                       COUNT(*) FILTER (WHERE failed_at IS NOT NULL)
+                FROM alert_queue
+            """) as cursor:
+                pending, failed = await cursor.fetchone()
+                return {"pending": pending, "failed": failed}
 
     async def record_ha_event(
         self,
@@ -86,77 +203,6 @@ class Storage:
                 ) as cursor:
                     rows = await cursor.fetchall()
                     return [dict(row) for row in rows]
-
-    async def acquire_or_renew_lease(
-        self, node_name: str, duration_sec: float
-    ) -> bool:
-        """Acquires or renews the lease for node_name."""
-        now_dt = datetime.now(timezone.utc)
-        now_str = now_dt.isoformat()
-        expires_dt = datetime.fromtimestamp(now_dt.timestamp() + duration_sec, tz=timezone.utc)
-        expires_str = expires_dt.isoformat()
-
-        async with self._lock:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute("SELECT holder_node, expires_at, is_active FROM ha_lease WHERE id = 1") as cursor:
-                    row = await cursor.fetchone()
-
-                if row is None:
-                    # First time lease
-                    await db.execute(
-                        """
-                        INSERT INTO ha_lease (id, holder_node, acquired_at, expires_at, is_active)
-                        VALUES (1, ?, ?, ?, 1)
-                        """,
-                        (node_name, now_str, expires_str),
-                    )
-                    await db.commit()
-                    return True
-
-                current_holder = row["holder_node"]
-                current_expires = datetime.fromisoformat(row["expires_at"])
-                is_active = bool(row["is_active"])
-
-                # If same holder or previous lease expired or inactive
-                if current_holder == node_name or not is_active or now_dt > current_expires:
-                    await db.execute(
-                        """
-                        UPDATE ha_lease
-                        SET holder_node = ?, acquired_at = ?, expires_at = ?, is_active = 1
-                        WHERE id = 1
-                        """,
-                        (node_name, now_str, expires_str),
-                    )
-                    await db.commit()
-                    return True
-
-                return False
-
-    async def release_lease(self, node_name: str) -> None:
-        async with self._lock:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    """
-                    UPDATE ha_lease
-                    SET is_active = 0
-                    WHERE id = 1 AND holder_node = ?
-                    """,
-                    (node_name,),
-                )
-                await db.commit()
-
-    async def get_current_lease(self) -> Optional[Dict[str, Any]]:
-        async with self._lock:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(
-                    "SELECT holder_node, acquired_at, expires_at, is_active FROM ha_lease WHERE id = 1"
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    if row:
-                        return dict(row)
-                    return None
 
     async def record_incident(
         self,

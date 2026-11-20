@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 class ServerMetrics(BaseModel):
     name: str = Field(description="Server identifier name")
+    entity_id: str = ""
+    monitor_state: str = "UNKNOWN"
     hostname: str = Field(default="", description="Server hostname or IP")
     status: str = Field(default="Online", description="Online, Degraded, or Offline")
     is_online: bool = Field(default=True)
@@ -63,3 +65,4 @@ class UptimeKumaOverview(BaseModel):
     up_count: int = Field(default=0)
     down_count: int = Field(default=0)
     error_message: Optional[str] = Field(default=None)
+    state: str = "UNKNOWN"

@@ -46,4 +46,13 @@ async def test_uptime_kuma_unreachable():
     client = UptimeKumaClient(base_url="http://192.0.2.1:29000", timeout_sec=0.1)
     overview = await client.get_overview()
     assert overview.available is False
-    assert "недоступен" in overview.error_message
+    assert overview.state == "UNKNOWN"
+
+
+def test_metrics_keep_distinct_monitors_with_the_same_name():
+    monitors = UptimeKumaClient()._parse_prometheus_metrics(
+        'monitor_status{monitor_name="same",monitor_url="http://a"} 0\n'
+        'monitor_status{monitor_name="same",monitor_url="http://b"} 3\n'
+    )
+    assert sorted(m.status for m in monitors) == ["DOWN", "MAINTENANCE"]
+    assert len({m.id for m in monitors}) == 2

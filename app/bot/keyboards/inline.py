@@ -31,8 +31,8 @@ def servers_keyboard() -> InlineKeyboardMarkup:
     """Builds keyboard for viewing specific server details."""
     keyboard = [
         [
-            InlineKeyboardButton(text="🖥 BilioniD-factories (Main)", callback_data="server_detail:bili"),
-            InlineKeyboardButton(text="🖥 SUSLIKVPN (Backup)", callback_data="server_detail:susl"),
+            InlineKeyboardButton(text="🖥 Main", callback_data="server_detail:bili"),
+            InlineKeyboardButton(text="🖥 Backup", callback_data="server_detail:susl"),
         ],
         [
             InlineKeyboardButton(text="🔄 Обновить", callback_data="nav_servers"),
@@ -45,7 +45,7 @@ def servers_keyboard() -> InlineKeyboardMarkup:
 def server_detail_keyboard(server_key: str) -> InlineKeyboardMarkup:
     """Keyboard for single server view."""
     other_key = "susl" if server_key == "bili" else "bili"
-    other_name = "SUSLIKVPN" if server_key == "bili" else "BilioniD-factories"
+    other_name = "Backup" if server_key == "bili" else "Main"
     keyboard = [
         [
             InlineKeyboardButton(text=f"Перейти к {other_name}", callback_data=f"server_detail:{other_key}"),
@@ -56,33 +56,6 @@ def server_detail_keyboard(server_key: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🔙 Главное меню", callback_data="nav_main_menu"),
-        ],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-def ha_keyboard() -> InlineKeyboardMarkup:
-    """Keyboard for HA diagnostics and manual failover control."""
-    keyboard = [
-        [
-            InlineKeyboardButton(text="🔄 Обновить HA", callback_data="nav_ha"),
-            InlineKeyboardButton(text="⚡ Ручное переключение", callback_data="ha_manual_prompt"),
-        ],
-        [
-            InlineKeyboardButton(text="🔙 Главное меню", callback_data="nav_main_menu"),
-        ],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-def ha_manual_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Confirmation keyboard for manual takeover/release."""
-    keyboard = [
-        [
-            InlineKeyboardButton(text="⚠️ Подтвердить переключение", callback_data="ha_force_toggle"),
-        ],
-        [
-            InlineKeyboardButton(text="❌ Отмена", callback_data="nav_ha"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)

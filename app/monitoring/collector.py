@@ -21,7 +21,7 @@ logger = logging.getLogger("bilionid_ha.collector")
 
 
 class MetricsCollector:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, docker_monitor: DockerMonitor | None = None):
         self.settings = settings
         self.beszel = BeszelClient(
             main_url=settings.BESZEL_MAIN_URL,
@@ -29,6 +29,9 @@ class MetricsCollector:
             username=settings.BESZEL_USERNAME,
             password=settings.BESZEL_PASSWORD,
             auth_token=settings.BESZEL_AUTH_TOKEN,
+            backup_username=settings.BESZEL_BACKUP_USERNAME,
+            backup_password=settings.BESZEL_BACKUP_PASSWORD,
+            backup_auth_token=settings.BESZEL_BACKUP_AUTH_TOKEN,
         )
         self.uptime_kuma = UptimeKumaClient(
             base_url=settings.UPTIME_KUMA_URL,
@@ -36,11 +39,13 @@ class MetricsCollector:
             username=settings.UPTIME_KUMA_USERNAME,
             password=settings.UPTIME_KUMA_PASSWORD,
             enabled=settings.UPTIME_KUMA_ENABLED,
+            status_page_slug=settings.UPTIME_KUMA_STATUS_PAGE_SLUG,
         )
-        self.docker = DockerMonitor(
+        self.docker = docker_monitor or DockerMonitor(
             server_name=settings.NODE_NAME,
             socket_path=settings.DOCKER_SOCKET_PATH,
             enabled=settings.DOCKER_MONITOR_ENABLED,
+            proxy_url=settings.DOCKER_PROXY_URL,
         )
 
         self._cached_servers: List[ServerMetrics] = []
@@ -55,20 +60,16 @@ class MetricsCollector:
             if not force_refresh and self._cached_servers and (now - self._cached_servers_time < self._cache_ttl_sec):
                 return self._cached_servers
 
-            servers = await self.beszel.get_all_servers()
-            if not servers:
-                # If Beszel hubs are unreachable, gather local fallback for this node
-                local_metric = self.beszel.get_local_fallback_metrics(self.settings.NODE_NAME)
-                # And create an offline placeholder for the peer node
-                peer_metric = ServerMetrics(
-                    name=self.settings.PEER_NODE_NAME,
-                    hostname=self.settings.PEER_TAILSCALE_IP,
-                    status="🔴 Offline (Hub unreachable)",
-                    is_online=False,
-                    source="unavailable",
-                    last_updated=datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                )
-                servers = [local_metric, peer_metric]
+            servers = await self.beszel.get_all_servers() if self.settings.BESZEL_ENABLED else []
+            by_host = {(s.hostname or s.name).casefold(): s for s in servers}
+            for previous in self._cached_servers:
+                key = (previous.hostname or previous.name).casefold()
+                if previous.source == "beszel" and key not in by_host:
+                    by_host[key] = previous.model_copy(update={
+                        "status": "⚪ Нет свежих данных", "is_online": False,
+                        "monitor_state": "UNKNOWN",
+                    })
+            servers = list(by_host.values())
 
             self._cached_servers = servers
             self._cached_servers_time = now
@@ -77,24 +78,16 @@ class MetricsCollector:
     async def get_server_detail(self, query: str) -> Optional[ServerMetrics]:
         """Returns details for a specific server (e.g. 'bili', 'susl', 'main', 'backup')."""
         servers = await self.get_servers()
-        query_l = query.lower()
-
-        # Keyword mapping
-        alias_map = {
-            "bili": "bilionid",
-            "main": "bilionid",
-            "primary": "bilionid",
-            "susl": "suslikvpn",
-            "backup": "suslikvpn",
-            "standby": "suslikvpn",
-        }
-        target_term = alias_map.get(query_l, query_l)
-
-        for s in servers:
-            if target_term in s.name.lower() or target_term in s.hostname.lower():
-                return s
-
-        return servers[0] if servers else None
+        query_l = query.strip().casefold()
+        primary = self.settings.NODE_NAME if self.settings.is_primary else self.settings.PEER_NODE_NAME
+        standby = self.settings.PEER_NODE_NAME if self.settings.is_primary else self.settings.NODE_NAME
+        names = {"bili": primary, "main": primary, "primary": primary,
+                 "susl": standby, "backup": standby, "standby": standby}
+        target = names.get(query_l, query_l).casefold()
+        matches = [s for s in servers if target in {s.name.casefold(), s.hostname.casefold()}]
+        if not matches and target:
+            matches = [s for s in servers if target in s.name.casefold() or target in s.hostname.casefold()]
+        return matches[0] if len(matches) == 1 else None
 
     async def get_all_containers(self) -> Dict[str, List[ContainerInfo]]:
         """
@@ -111,12 +104,14 @@ class MetricsCollector:
         results[self.settings.NODE_NAME] = local_containers
 
         # 2. Remote containers via peer's HA API
+        if not self.settings.HA_PEER_ENABLED:
+            return results
         peer_url = f"{self.settings.peer_ha_url}/ha/containers"
         headers = {"X-HA-Secret": self.settings.HA_SECRET_KEY}
         try:
             timeout = aiohttp.ClientTimeout(total=3.0)
             async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                async with session.get(peer_url) as resp:
+                async with session.get(peer_url, allow_redirects=False) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         containers = [ContainerInfo(**item) for item in data.get("containers", [])]
@@ -134,8 +129,10 @@ class MetricsCollector:
 
     async def get_beszel_status(self) -> Dict[str, Any]:
         """Checks both Beszel Hubs health."""
-        main_health = await self.beszel.check_hub_health(self.settings.BESZEL_MAIN_URL)
-        backup_health = await self.beszel.check_hub_health(self.settings.BESZEL_BACKUP_URL)
+        main_health, backup_health = await asyncio.gather(
+            self.beszel.check_hub_health(self.settings.BESZEL_MAIN_URL),
+            self.beszel.check_hub_health(self.settings.BESZEL_BACKUP_URL),
+        )
         return {
             "active_hub": self.beszel.active_hub,
             "main": main_health,

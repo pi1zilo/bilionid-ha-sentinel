@@ -20,10 +20,12 @@ class DockerMonitor:
         server_name: str = "Local",
         socket_path: str = "/var/run/docker.sock",
         enabled: bool = True,
+        proxy_url: str = "",
     ):
         self.server_name = server_name
         self.socket_path = socket_path
         self.enabled = enabled
+        self.proxy_url = proxy_url
         self._client: Optional[docker.DockerClient] = None
 
     def _get_client(self) -> Optional[docker.DockerClient]:
@@ -32,6 +34,9 @@ class DockerMonitor:
         if self._client is not None:
             return self._client
         try:
+            if self.proxy_url:
+                self._client = docker.DockerClient(base_url=self.proxy_url, timeout=4)
+                return self._client
             if Path(self.socket_path).exists():
                 self._client = docker.DockerClient(base_url=f"unix://{self.socket_path}", timeout=4)
                 return self._client

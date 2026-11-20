@@ -58,47 +58,49 @@ class BeszelClient:
         password: Optional[str] = None,
         auth_token: Optional[str] = None,
         timeout_sec: float = 4.0,
+        backup_username: str | None = None,
+        backup_password: str | None = None,
+        backup_auth_token: str | None = None,
     ):
         self.main_url = main_url.rstrip("/")
         self.backup_url = backup_url.rstrip("/")
-        self.username = username
-        self.password = password
-        self.auth_token = auth_token
+        self.credentials = {
+            self.main_url: (username, password),
+            self.backup_url: (backup_username, backup_password),
+        }
+        self.static_tokens = {
+            self.main_url: auth_token,
+            self.backup_url: backup_auth_token,
+        }
         self.timeout = aiohttp.ClientTimeout(total=timeout_sec)
         self.active_hub = self.main_url
         self._tokens: Dict[str, str] = {}
-        if auth_token:
-            self._tokens[self.main_url] = auth_token
-            self._tokens[self.backup_url] = auth_token
+        self.hub_available: dict[str, bool] = {}
 
     async def get_auth_token(self, session: aiohttp.ClientSession, base_url: str) -> Optional[str]:
         """Authenticates with PocketBase if credentials are provided."""
+        if self.static_tokens.get(base_url):
+            return self.static_tokens[base_url]
         if self._tokens.get(base_url):
             return self._tokens[base_url]
 
-        if not self.username or not self.password:
+        username, password = self.credentials.get(base_url, (None, None))
+        if not username or not password:
             return None
 
-        # PocketBase authentication endpoints
-        auth_endpoints = [
-            f"{base_url}/api/collections/users/auth-with-password",
-            f"{base_url}/api/admins/auth-with-password",
-            f"{base_url}/api/collections/_superusers/auth-with-password",
-        ]
-
-        payload = {"identity": self.username, "password": self.password}
-
-        for ep in auth_endpoints:
-            try:
-                async with session.post(ep, json=payload, timeout=self.timeout) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        token = data.get("token")
-                        if token:
-                            self._tokens[base_url] = token
-                            return token
-            except Exception as e:
-                logger.debug("Failed auth attempt against %s: %s", ep, e)
+        endpoint = f"{base_url}/api/collections/users/auth-with-password"
+        try:
+            async with session.post(
+                endpoint, json={"identity": username, "password": password},
+                timeout=self.timeout, allow_redirects=False,
+            ) as response:
+                if response.status == 200:
+                    token = (await response.json()).get("token")
+                    if token:
+                        self._tokens[base_url] = token
+                        return token
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            logger.debug("Beszel authentication: %s", type(exc).__name__)
 
         return None
 
@@ -111,23 +113,39 @@ class BeszelClient:
         if token:
             headers["Authorization"] = token
 
-        url = f"{hub_url}/api/collections/systems/records?perPage=50"
+        url = f"{hub_url}/api/collections/systems/records"
         try:
-            async with session.get(url, headers=headers, timeout=self.timeout) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    items = data.get("items", [])
-                    return items
-                elif resp.status in (401, 403):
-                    # Invalidate cached token
+            async with session.get(
+                url, params={"perPage": 50}, headers=headers, timeout=self.timeout, allow_redirects=False
+            ) as resp:
+                if resp.status != 200:
                     self._tokens.pop(hub_url, None)
-                    logger.warning("Beszel Hub %s returned HTTP %s (auth issue)", hub_url, resp.status)
-                else:
-                    logger.warning("Beszel Hub %s returned HTTP %s", hub_url, resp.status)
-        except Exception as e:
-            logger.debug("Error connecting to Beszel Hub %s: %s", hub_url, e)
+                    logger.warning("Beszel systems: HTTP %s", resp.status)
+                    return None
+                items = (await resp.json())["items"]
+            if not isinstance(items, list):
+                return None
+            await asyncio.gather(*(self._attach_stats(session, hub_url, headers, item) for item in items))
+            return items
+        except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+            logger.debug("Beszel systems: %s", type(exc).__name__)
 
         return None
+
+    async def _attach_stats(self, session, hub_url: str, headers: dict, item: dict) -> None:
+        system_id = item.get("id", "")
+        if item.get("status") != "up" or not isinstance(system_id, str) or not system_id.isalnum():
+            return
+        endpoint = f"{hub_url}/api/collections/system_stats/records"
+        params = {"filter": f'system="{system_id}" && type="1m"', "sort": "-created", "perPage": 1}
+        try:
+            async with session.get(
+                endpoint, params=params, headers=headers, timeout=self.timeout, allow_redirects=False
+            ) as response:
+                if response.status == 200 and (items := (await response.json()).get("items")):
+                    item["_stats"] = items[0]
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            logger.debug("Beszel detail: %s", type(exc).__name__)
 
     def _parse_system_record(self, item: Dict[str, Any]) -> ServerMetrics:
         """Parses a PocketBase system record into typed ServerMetrics."""
@@ -140,50 +158,46 @@ class BeszelClient:
             except Exception:
                 info = {}
 
-        status_str = item.get("status", "up")
+        status_str = item.get("status", "")
         is_online = (status_str == "up")
-
-        # Beszel info structure typically contains:
-        # cpu: cpu usage percent
-        # m: memory used (GB)
-        # mt: memory total (GB)
-        # mp: memory percent
-        # d: disk used (GB)
-        # dt: disk total (GB)
-        # dp: disk percent
-        # l: load average [1m, 5m, 15m]
-        # u: uptime seconds
-        # c: containers total/running
-        cpu = float(info.get("cpu", 0.0))
-        ram_used = float(info.get("m", 0.0))
-        ram_total = float(info.get("mt", 0.0))
-        ram_percent = float(info.get("mp", (ram_used / ram_total * 100) if ram_total > 0 else 0.0))
-
-        disk_used = float(info.get("d", 0.0))
-        disk_total = float(info.get("dt", 0.0))
+        state = {"up": "UP", "down": "DOWN", "paused": "PAUSED", "pending": "PENDING"}.get(
+            status_str, "UNKNOWN"
+        )
+        stats_record = item.get("_stats") or {}
+        stats = stats_record.get("stats") or {}
+        if isinstance(stats, str):
+            import json
+            stats = json.loads(stats)
+        cpu = float(stats.get("cpu", info.get("cpu", 0)) or 0)
+        memory_bytes = stats.get("mem")
+        if isinstance(memory_bytes, list) and len(memory_bytes) >= 2:
+            ram_total, ram_used = (float(value) / 1024**3 for value in memory_bytes[:2])
+        else:
+            ram_total = float(stats.get("m", 0) or 0)
+            ram_used = float(stats.get("mu", 0) or 0)
+        ram_percent = float(stats.get("mp", info.get("mp", 0)) or 0)
+        disk_used = float(stats.get("du", 0) or 0)
+        disk_total = float(stats.get("d", 0) or 0)
         disk_free = max(0.0, disk_total - disk_used)
-        disk_percent = float(info.get("dp", (disk_used / disk_total * 100) if disk_total > 0 else 0.0))
+        disk_percent = float(stats.get("dp", info.get("dp", 0)) or 0)
 
-        load = info.get("l", [0.0, 0.0, 0.0])
+        load = stats.get("la", info.get("la", [0.0, 0.0, 0.0]))
         if not isinstance(load, list) or len(load) < 3:
             load = [0.0, 0.0, 0.0]
 
         uptime_sec = int(info.get("u", 0))
         uptime_s = format_uptime(uptime_sec) if uptime_sec > 0 else "Н/Д"
 
-        containers_total = int(info.get("c", 0))
-        containers_running = int(info.get("cr", containers_total))
-        containers_stopped = max(0, containers_total - containers_running)
-
-        temp = info.get("t")
-        temp_val = float(temp) if temp is not None else None
-
-        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        temp = info.get("dt")
+        temp_val = float(temp) if isinstance(temp, (int, float)) and temp else None
+        last_updated = stats_record.get("created") or item.get("updated") or ""
 
         return ServerMetrics(
             name=name,
+            entity_id=str(item.get("id") or item.get("host") or name),
             hostname=item.get("host", ""),
-            status="🟢 Online" if is_online else "🔴 Offline",
+            status={"UP": "🟢 Online", "DOWN": "🔴 Offline"}.get(state, f"⚪ {state}"),
+            monitor_state=state,
             is_online=is_online,
             cpu_percent=round(cpu, 1),
             ram_used_gb=round(ram_used, 1),
@@ -198,11 +212,8 @@ class BeszelClient:
             load_15m=round(float(load[2]), 2),
             uptime_str=uptime_s,
             uptime_seconds=uptime_sec,
-            docker_containers_total=containers_total,
-            docker_containers_running=containers_running,
-            docker_containers_stopped=containers_stopped,
             temperature=temp_val,
-            last_updated=now_str,
+            last_updated=last_updated,
             source="beszel",
         )
 
@@ -219,7 +230,7 @@ class BeszelClient:
             boot_time = psutil.boot_time()
             uptime_sec = int(datetime.now().timestamp() - boot_time)
 
-            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            now_str = datetime.now(timezone.utc).isoformat()
 
             return ServerMetrics(
                 name=server_name,
@@ -260,22 +271,21 @@ class BeszelClient:
         Returns metrics for both Main and Backup nodes.
         """
         async with aiohttp.ClientSession() as session:
-            # 1. Try Main Hub
-            items = await self._fetch_from_hub(session, self.main_url)
-            if items is not None:
-                self.active_hub = self.main_url
-                return [self._parse_system_record(item) for item in items]
-
-            logger.info("Main Beszel Hub unreachable, failing over to Backup Hub...")
-
-            # 2. Try Backup Hub
-            items = await self._fetch_from_hub(session, self.backup_url)
-            if items is not None:
-                self.active_hub = self.backup_url
-                return [self._parse_system_record(item) for item in items]
-
-            logger.warning("Both Beszel Hubs are unreachable.")
-            return []
+            hubs = list(dict.fromkeys(url for url in (self.main_url, self.backup_url) if url))
+            snapshots = await asyncio.gather(*(self._fetch_from_hub(session, url) for url in hubs))
+        self.hub_available = {url: items is not None for url, items in zip(hubs, snapshots)}
+        self.active_hub = next((url for url, items in zip(hubs, snapshots) if items), "—")
+        servers: dict[str, ServerMetrics] = {}
+        for items in snapshots:
+            for item in items or ():
+                try:
+                    metric = self._parse_system_record(item)
+                except (AttributeError, TypeError, ValueError):
+                    logger.warning("Skipping an invalid Beszel record")
+                    continue
+                key = (metric.hostname or metric.name).casefold()
+                servers.setdefault(key, metric)
+        return list(servers.values())
 
     async def get_server_by_query(self, query: str) -> Optional[ServerMetrics]:
         """Finds server by name or substring query (e.g. 'bili', 'susl')."""
