@@ -8,6 +8,7 @@ from aiohttp import web
 from app.core.config import Settings
 from app.ha.supervisor import HASupervisor
 from app.monitoring.docker.client import DockerMonitor
+from app.monitoring.server_logs import DEFAULT_LOG_LINES, JournalUnavailable, parse_log_lines, read_server_journal
 from app.services.monitoring import MonitoringService
 
 logger = logging.getLogger("bilionid_ha.http_server")
@@ -33,6 +34,11 @@ class HAHttpServer:
         if settings.HA_PEER_ENABLED:
             self.app.router.add_get("/ha/status", self.peer_status)
             self.app.router.add_get("/ha/containers", self.peer_containers)
+            self.app.router.add_get("/ha/incidents", self.peer_incidents)
+            if settings.SERVER_LOGS_ENABLED:
+                self.app.router.add_get("/ha/logs", self.peer_logs)
+        if settings.polling_enabled and settings.BESZEL_WEBHOOK_SECRET:
+            self.app.router.add_post("/events/beszel", self.beszel_event)
         if settings.polling_enabled and settings.UPTIME_KUMA_WEBHOOK_SECRET:
             self.app.router.add_post("/events/kuma", self.kuma_event)
         if settings.polling_enabled and settings.ZABBIX_WEBHOOK_SECRET:
@@ -63,6 +69,23 @@ class HAHttpServer:
         containers = await self.docker_monitor.get_containers()
         return web.json_response({"containers": [item.model_dump() for item in containers]})
 
+    async def peer_incidents(self, request: web.Request) -> web.Response:
+        self._authorize_peer(request)
+        incidents = await self.monitoring.storage.get_recent_incidents(limit=10)
+        return web.json_response({"node": self.settings.NODE_NAME, "incidents": incidents})
+
+    async def peer_logs(self, request: web.Request) -> web.Response:
+        self._authorize_peer(request)
+        try:
+            lines = parse_log_lines(request.query.get("lines", str(DEFAULT_LOG_LINES)))
+        except ValueError:
+            raise web.HTTPBadRequest(text="Invalid journal line count") from None
+        try:
+            text = await read_server_journal(lines)
+        except JournalUnavailable:
+            raise web.HTTPServiceUnavailable(text="System journal unavailable") from None
+        return web.Response(text=text, content_type="text/plain", charset="utf-8")
+
     async def _event(self, request: web.Request, secret: str, accept) -> web.Response:
         if not has_secret(request, "X-Monitor-Secret", secret):
             raise web.HTTPUnauthorized()
@@ -77,6 +100,9 @@ class HAHttpServer:
 
     async def kuma_event(self, request: web.Request) -> web.Response:
         return await self._event(request, self.settings.UPTIME_KUMA_WEBHOOK_SECRET, self.monitoring.accept_kuma)
+
+    async def beszel_event(self, request: web.Request) -> web.Response:
+        return await self._event(request, self.settings.BESZEL_WEBHOOK_SECRET, self.monitoring.accept_beszel)
 
     async def zabbix_event(self, request: web.Request) -> web.Response:
         return await self._event(request, self.settings.ZABBIX_WEBHOOK_SECRET, self.monitoring.accept_zabbix)

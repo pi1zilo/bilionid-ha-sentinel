@@ -42,6 +42,13 @@ def servers_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+def server_logs_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Main", callback_data="server_logs:main"),
+        InlineKeyboardButton(text="Backup", callback_data="server_logs:backup"),
+    ]])
+
+
 def server_detail_keyboard(server_key: str) -> InlineKeyboardMarkup:
     """Keyboard for single server view."""
     other_key = "susl" if server_key == "bili" else "bili"

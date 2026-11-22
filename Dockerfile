@@ -9,6 +9,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ARG INSTALL_JOURNALCTL=false
+RUN if [ "$INSTALL_JOURNALCTL" = true ]; then \
+        apt-get update && \
+        apt-get install -y --no-install-recommends systemd && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Install Python requirements
 COPY requirements.txt constraints.txt /app/
 RUN pip install --no-cache-dir -r /app/requirements.txt

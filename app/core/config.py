@@ -75,13 +75,10 @@ class Settings(BaseSettings):
     )
     TELEGRAM_CHAT_ID: int = Field(
         default=0,
-        description="Telegram Chat ID for operational alerts"
+        le=0,
+        description="Telegram group ID for operational alerts"
     )
-    TELEGRAM_ADMIN_USER_ID: int = Field(
-        default=0,
-        description="Telegram User ID of the owner for authorization"
-    )
-    TELEGRAM_COMMAND_CHAT_ID: int = 0
+    TELEGRAM_COMMAND_CHAT_ID: int = Field(default=0, le=0)
     TELEGRAM_POLLING_ENABLED: bool | None = None
     TELEGRAM_API_BASE: str = ""
     RATE_LIMIT_COMMANDS_PER_MIN: int = Field(
@@ -114,6 +111,7 @@ class Settings(BaseSettings):
     BESZEL_BACKUP_USERNAME: str = ""
     BESZEL_BACKUP_PASSWORD: str = ""
     BESZEL_BACKUP_AUTH_TOKEN: str = ""
+    BESZEL_WEBHOOK_SECRET: str = ""
 
     # Uptime Kuma Monitoring (Optional)
     UPTIME_KUMA_ENABLED: bool = Field(
@@ -146,6 +144,7 @@ class Settings(BaseSettings):
     MONITOR_INTERVAL_SEC: float = Field(default=15, gt=0)
     MONITOR_SOURCE_FAILURES: int = Field(default=2, ge=1)
     ALERT_TIMEZONE: str = "Europe/Moscow"
+    SERVER_LOGS_ENABLED: bool = False
 
     # Docker Monitoring
     DOCKER_SOCKET_PATH: str = Field(
@@ -191,6 +190,10 @@ class Settings(BaseSettings):
         return self.is_primary if self.TELEGRAM_POLLING_ENABLED is None else self.TELEGRAM_POLLING_ENABLED
 
     @property
+    def command_chat_id(self) -> int:
+        return self.TELEGRAM_COMMAND_CHAT_ID or self.TELEGRAM_CHAT_ID
+
+    @property
     def peer_ha_url(self) -> str:
         return f"http://{self.PEER_TAILSCALE_IP}:{self.HA_PEER_PORT or self.HA_PORT}"
 
@@ -214,6 +217,7 @@ class Settings(BaseSettings):
             "UPTIME_KUMA_API_KEY",
             "BESZEL_BACKUP_PASSWORD",
             "BESZEL_BACKUP_AUTH_TOKEN",
+            "BESZEL_WEBHOOK_SECRET",
             "UPTIME_KUMA_WEBHOOK_SECRET",
             "ZABBIX_API_TOKEN",
             "ZABBIX_WEBHOOK_SECRET",
@@ -239,9 +243,7 @@ class Settings(BaseSettings):
         if self.polling_enabled or self.HA_WATCH_PRIMARY:
             if not self.TELEGRAM_BOT_TOKEN or not self.TELEGRAM_CHAT_ID:
                 raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
-        if self.polling_enabled and self.TELEGRAM_ADMIN_USER_ID <= 0:
-            raise ValueError("TELEGRAM_ADMIN_USER_ID must identify the bot owner")
-        for secret in (self.UPTIME_KUMA_WEBHOOK_SECRET, self.ZABBIX_WEBHOOK_SECRET):
+        for secret in (self.BESZEL_WEBHOOK_SECRET, self.UPTIME_KUMA_WEBHOOK_SECRET, self.ZABBIX_WEBHOOK_SECRET):
             if secret and len(secret) < 32:
                 raise ValueError("Webhook secrets must be at least 32 characters")
         if bool(self.ZABBIX_URL) != bool(self.ZABBIX_API_TOKEN):

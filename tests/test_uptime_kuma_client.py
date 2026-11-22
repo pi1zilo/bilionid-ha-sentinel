@@ -2,7 +2,7 @@
 Unit tests for Uptime Kuma monitoring client.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.monitoring.uptime_kuma.client import UptimeKumaClient
@@ -47,6 +47,29 @@ async def test_uptime_kuma_unreachable():
     overview = await client.get_overview()
     assert overview.available is False
     assert overview.state == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slug, expected", [("", "default"), ("public", "public")])
+async def test_metrics_error_falls_back_to_status_page(slug, expected):
+    client = UptimeKumaClient(base_url="http://kuma", status_page_slug=slug)
+    session = MagicMock()
+    metrics = MagicMock(status=401)
+    page = MagicMock(status=200, json=AsyncMock(return_value={
+        "heartbeatList": {"1": [{"status": 1}]},
+    }))
+    contexts = [MagicMock(), MagicMock()]
+    for context, response in zip(contexts, [metrics, page]):
+        context.__aenter__.return_value = response
+    session.get.side_effect = contexts
+
+    with patch("aiohttp.ClientSession") as client_session:
+        client_session.return_value.__aenter__.return_value = session
+        overview = await client.get_overview()
+
+    assert overview.available
+    assert overview.up_count == 1
+    assert session.get.call_args.args[0] == f"http://kuma/api/status-page/heartbeat/{expected}"
 
 
 def test_metrics_keep_distinct_monitors_with_the_same_name():

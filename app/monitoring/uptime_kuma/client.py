@@ -26,7 +26,7 @@ class UptimeKumaClient:
     ):
         self.base_url = base_url.rstrip("/")
         self.enabled = enabled
-        self.status_page_slug = status_page_slug
+        self.status_page_slug = status_page_slug or "default"
         self.timeout = aiohttp.ClientTimeout(total=timeout_sec)
         self.auth = aiohttp.BasicAuth("", api_key) if api_key else None
         if not self.auth and username and password:
@@ -50,17 +50,16 @@ class UptimeKumaClient:
             except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
                 logger.debug("Kuma metrics: %s", type(exc).__name__)
 
-            if self.status_page_slug:
-                slug = quote(self.status_page_slug, safe="")
-                try:
-                    async with session.get(
-                        f"{self.base_url}/api/status-page/heartbeat/{slug}", allow_redirects=False
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            return self._overview(self._parse_status_page_heartbeats(data))
-                except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
-                    logger.debug("Kuma status page: %s", type(exc).__name__)
+            slug = quote(self.status_page_slug, safe="")
+            try:
+                async with session.get(
+                    f"{self.base_url}/api/status-page/heartbeat/{slug}", allow_redirects=False
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return self._overview(self._parse_status_page_heartbeats(data))
+            except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+                logger.debug("Kuma status page: %s", type(exc).__name__)
         return UptimeKumaOverview(available=False, state="UNKNOWN", error_message=reason)
 
     @staticmethod

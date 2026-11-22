@@ -26,6 +26,8 @@ class ServerMetrics(BaseModel):
     load_15m: float = Field(default=0.0)
     uptime_str: str = Field(default="Unknown")
     uptime_seconds: int = Field(default=0)
+    uptime_sampled_at: str = ""
+    beszel_hub: str = ""
     docker_containers_total: int = Field(default=0)
     docker_containers_running: int = Field(default=0)
     docker_containers_stopped: int = Field(default=0)

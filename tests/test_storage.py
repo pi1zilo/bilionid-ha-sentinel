@@ -3,6 +3,8 @@ Unit tests for SQLite incident and HA event history.
 """
 
 from pathlib import Path
+import sqlite3
+
 import pytest
 
 from app.storage.db import Storage
@@ -44,3 +46,22 @@ async def test_ha_event_and_incident_recording(tmp_path: Path):
     await storage.resolve_incident(inc_id)
     active_incidents_after = await storage.get_active_incidents()
     assert len(active_incidents_after) == 0
+
+
+async def test_legacy_database_keeps_incidents_when_adding_resolution(tmp_path):
+    path = tmp_path / "test_state.db"
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE incidents (
+            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, category TEXT NOT NULL,
+            server TEXT NOT NULL, message TEXT NOT NULL, severity TEXT NOT NULL, resolved_at TEXT
+        )""")
+        db.execute("""INSERT INTO incidents VALUES (
+            1, '2026-11-21T10:00:00+00:00', 'HA', 'main', 'HA API', 'WARNING', NULL
+        )""")
+    db.close()
+    storage = Storage(path)
+    await storage.init_db()
+    await storage.init_db()
+    incident, = await storage.get_recent_incidents()
+    assert incident["message"] == "HA API"
+    assert incident["resolution"] == ""

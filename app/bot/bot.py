@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramConflictError
 from aiogram.methods import GetUpdates
 
 from app.bot.handlers import admin, alerts, containers, ha, monitoring, start, status
-from app.bot.middlewares.auth import OwnerAuthMiddleware
+from app.bot.middlewares.auth import ChatAuthMiddleware
 from app.bot.middlewares.rate_limit import RateLimitMiddleware
 from app.core.config import Settings
 from app.ha.supervisor import HASupervisor
@@ -64,11 +64,9 @@ class BotManager:
         self.dp = Dispatcher()
 
         # Middlewares
-        owner = OwnerAuthMiddleware(
-            self.settings.TELEGRAM_ADMIN_USER_ID, self.settings.TELEGRAM_COMMAND_CHAT_ID
-        )
-        self.dp.message.middleware(owner)
-        self.dp.callback_query.middleware(owner)
+        chat_auth = ChatAuthMiddleware(self.settings.command_chat_id)
+        self.dp.message.outer_middleware(chat_auth)
+        self.dp.callback_query.outer_middleware(chat_auth)
         self.dp.message.middleware(RateLimitMiddleware(self.settings.RATE_LIMIT_COMMANDS_PER_MIN))
         self.dp.callback_query.middleware(RateLimitMiddleware(self.settings.RATE_LIMIT_COMMANDS_PER_MIN))
 
@@ -177,7 +175,7 @@ class BotManager:
 
     async def send_alert_message(self, message: str) -> None:
         """Sends an operational alert to the designated Telegram chat."""
-        if not self.bot or not self.settings.TELEGRAM_CHAT_ID:
+        if not self.bot or self.settings.TELEGRAM_CHAT_ID >= 0:
             raise RuntimeError("Telegram delivery is not configured")
         await self.bot.send_message(chat_id=self.settings.TELEGRAM_CHAT_ID, text=message, parse_mode=None)
 

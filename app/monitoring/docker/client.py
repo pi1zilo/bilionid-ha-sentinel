@@ -6,6 +6,7 @@ and HA peer federation.
 import asyncio
 from pathlib import Path
 import logging
+import re
 from typing import List, Optional
 import docker
 
@@ -56,23 +57,21 @@ class DockerMonitor:
 
         containers_list: List[ContainerInfo] = []
         try:
-            for c in client.containers.list(all=True):
-                # Health status if available
-                health = None
-                attrs = c.attrs or {}
-                state_obj = attrs.get("State", {})
-                if "Health" in state_obj:
-                    health = state_obj["Health"].get("Status")
-
+            for container in client.api.containers(all=True):
+                state = container.get("State", "unknown")
+                status = container.get("Status", state)
+                health = re.search(r"\((?:health: )?(healthy|unhealthy|starting)\)$", status)
+                short_id = container["Id"][:12]
+                names = container.get("Names") or [short_id]
                 containers_list.append(
                     ContainerInfo(
                         server=self.server_name,
-                        id=c.short_id,
-                        name=c.name.lstrip("/"),
-                        image=c.image.tags[0] if c.image.tags else str(c.image.id[:12]),
-                        state=c.status,
-                        status=c.attrs.get("Status", c.status),
-                        health=health,
+                        id=short_id,
+                        name=names[0].lstrip("/"),
+                        image=container.get("Image", ""),
+                        state=state,
+                        status=status,
+                        health=health.group(1) if health else None,
                     )
                 )
         except Exception as e:

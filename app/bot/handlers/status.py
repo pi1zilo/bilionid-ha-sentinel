@@ -60,8 +60,8 @@ async def cmd_server_detail(
         return
 
     text = format_server_card(server, settings.ALERT_TIMEZONE)
-    primary = settings.NODE_NAME if settings.is_primary else settings.PEER_NODE_NAME
-    key = "bili" if server.name.casefold() == primary.casefold() else "susl"
+    primary = await collector.get_server_detail("main")
+    key = "bili" if server == primary else "susl"
     await message.answer(text, reply_markup=server_detail_keyboard(key), parse_mode=None)
 
 

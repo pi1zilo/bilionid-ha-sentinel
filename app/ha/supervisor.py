@@ -68,7 +68,10 @@ class HASupervisor:
             self.peer_health.last_seen_healthy = datetime.now(timezone.utc)
 
         if self.settings.HA_WATCH_PRIMARY and not self.settings.polling_enabled:
-            detail = "Polling Telegram не отвечает." if is_reachable else "Нет связи с HA API узла."
+            detail = (
+                "HA API узла отвечает, но бот не получает обновления от Telegram."
+                if is_reachable else "Проверка HA API узла не прошла."
+            )
             await self.monitoring.source_health(
                 "HA", self.settings.PEER_NODE_NAME, f"Бот на {self.settings.PEER_NODE_NAME}",
                 is_reachable and bool(self.peer_polling), detail,

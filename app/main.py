@@ -30,6 +30,7 @@ async def run_app() -> None:
             settings.TELEGRAM_BOT_TOKEN, settings.HA_SECRET_KEY,
             settings.BESZEL_PASSWORD, settings.BESZEL_AUTH_TOKEN,
             settings.BESZEL_BACKUP_PASSWORD, settings.BESZEL_BACKUP_AUTH_TOKEN,
+            settings.BESZEL_WEBHOOK_SECRET,
             settings.UPTIME_KUMA_PASSWORD, settings.UPTIME_KUMA_API_KEY,
             settings.UPTIME_KUMA_WEBHOOK_SECRET, settings.ZABBIX_API_TOKEN,
             settings.ZABBIX_WEBHOOK_SECRET,

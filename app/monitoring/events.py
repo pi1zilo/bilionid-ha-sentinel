@@ -15,3 +15,5 @@ class Observation:
     occurred_at: datetime | None = None
     observed_at: datetime | None = None
     severity: str = "WARNING"
+    duration_label: str = "Длительность сбоя"
+    link: str = ""

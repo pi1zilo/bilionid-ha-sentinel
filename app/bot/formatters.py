@@ -106,21 +106,39 @@ def format_uptime_kuma_view(overview: UptimeKumaOverview) -> str:
 
 
 def format_incidents_view(
-    ha_events: list[dict], incidents: list[dict], tz_name: str = "Europe/Moscow",
+    ha_events: list[dict], incidents: list[dict], tz_name: str = "Europe/Moscow", node_name: str = "",
 ) -> str:
     lines = ["🚨 Журнал инцидентов"]
     if not ha_events and not incidents:
         return f"{lines[0]}\nЗаписей пока нет."
+    entries = []
     for incident in incidents:
         timestamp = format_time(incident["timestamp"], tz_name)
         closed = incident.get("resolved_at")
-        state = f"🟢 до {format_time(closed, tz_name)}" if closed else "🔴 открыт"
-        lines.append(f"\n{state} · {incident['category']} · {incident['server']}\nС {timestamp}")
+        origin = incident.get("node") or node_name
+        reference = f" · {origin} #{incident['id']}" if origin else ""
+        standalone = closed == incident["timestamp"] and incident.get("severity") == "INFO"
+        state = "ℹ️" if standalone else "🟢" if closed else "🔴"
+        entry = f"{state} {incident['server']}\n{incident['category']}{reference} · {timestamp}"
         if incident["message"]:
-            lines.append(incident["message"][:160])
+            entry += f"\n{incident['message'][:200]}"
+        if closed and not standalone:
+            entry += f"\nВосстановление: {format_time(closed, tz_name)}"
+            if incident.get("resolution"):
+                entry += f" · {incident['resolution'][:200]}"
+        entries.append((incident["timestamp"], entry))
     for event in ha_events[:3]:
-        lines.append(f"\n• {format_time(event['timestamp'], tz_name)} · {event['event_type']}")
-    return "\n".join(lines)[:3800]
+        label = {
+            "POLLING_ENABLED": "Запуск узла с приёмом обновлений Telegram",
+            "STANDBY_STARTUP": "Запуск резервного узла",
+        }.get(event["event_type"], event["event_type"])
+        entries.append((event["timestamp"],
+            f"• {event['source_node']} · {label}\n{format_time(event['timestamp'], tz_name)}"))
+    for _, entry in sorted(entries, reverse=True):
+        if sum(len(line) + 1 for line in lines) + len(entry) + 2 > 3800:
+            break
+        lines.extend(("", entry))
+    return "\n".join(lines)
 
 
 def format_admin_view(supervisor: HASupervisor) -> str:

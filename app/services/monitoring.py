@@ -2,14 +2,16 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter, TelegramUnauthorizedError
 
 from app.core.config import Settings
+from app.monitoring.beszel.notifications import HOST_STATUS, parse_threshold
 from app.monitoring.collector import MetricsCollector
 from app.monitoring.events import Observation
+from app.monitoring.models import ServerMetrics
 from app.storage.db import Storage
 
 logger = logging.getLogger("bilionid_ha.monitoring")
@@ -35,19 +37,38 @@ class MonitoringService:
         self._failures: dict[tuple[str, str], int] = {}
         self._kuma_disagreements: dict[str, tuple[str, int]] = {}
 
-    def _render(self, event: Observation, at: datetime, started: datetime | None) -> str:
-        stamp = at.astimezone(self.tz).strftime("%d.%m.%Y %H:%M:%S %Z")
+    def _stamp(self, at: datetime) -> str:
+        return at.astimezone(self.tz).strftime("%d.%m.%Y %H:%M:%S %Z")
+
+    def _render(
+        self, event: Observation, at: datetime, incident_id: int,
+        started: datetime | None = None, initial_detail: str = "",
+    ) -> str:
+        source = f"{event.source} · {self.settings.NODE_NAME} #{incident_id}"
         if started is None:
-            label = "Начало сбоя" if event.occurred_at else "Обнаружено"
-            text = f"🔴 {event.name}\nИсточник: {event.source}\n{label}: {stamp}"
+            label = "Время события" if event.occurred_at else "Обнаружено"
+            text = f"🔴 {event.name}\n{source}\n{label}: {self._stamp(at)}"
+            if event.detail:
+                text += f"\n{event.detail[:500]}"
         else:
             seconds = max(0, int((at - started).total_seconds()))
             hours, remainder = divmod(seconds, 3600)
             minutes, seconds = divmod(remainder, 60)
-            text = f"🟢 {event.name} — восстановлено\nИсточник: {event.source}\nВремя: {stamp}\nПростой: {hours} ч {minutes} мин {seconds} с"
-        if event.detail:
-            text += f"\n{event.detail[:500]}"
+            text = (
+                f"🟢 {event.name} — восстановлено\n{source}\n"
+                f"Первый сигнал: {self._stamp(started)}\nВосстановление: {self._stamp(at)}\n"
+                f"{event.duration_label}: {hours} ч {minutes} мин {seconds} с"
+            )
+            if initial_detail:
+                text += f"\nПри первом сигнале: {initial_detail[:500]}"
+            if event.detail:
+                text += f"\nПосле восстановления: {event.detail[:500]}"
+        if event.link:
+            text += f"\n{event.link}"
         return text
+
+    def _render_event(self, source: str, name: str, detail: str, at: datetime, event_id: int) -> str:
+        return f"ℹ️ {name}\n{source} · {self.settings.NODE_NAME} #{event_id}\n{self._stamp(at)}\n{detail}"
 
     async def observe(self, observation: Observation) -> None:
         await self.storage.apply_observation(observation, self._render)
@@ -70,12 +91,38 @@ class MonitoringService:
             if url and (role == "Main" or url != beszel.main_url):
                 await self.source_health(
                     "Beszel", f"hub:{role}", f"Beszel Hub {role}",
-                    beszel.hub_available.get(url, False), "Данные API недоступны.",
+                    beszel.hub_available.get(url, False), "Бот не получил данные от API хаба.",
                 )
         for server in servers:
             if server.monitor_state in {"UP", "DOWN"}:
                 key = (server.hostname or server.name).casefold()
-                await self.observe(Observation("Beszel", f"host:{key}", server.name, server.monitor_state))
+                detail = (
+                    "Хаб потерял связь с агентом на сервере." if server.monitor_state == "DOWN"
+                    else "Хаб снова получает данные от агента на сервере."
+                )
+                await self.observe(Observation("Beszel", f"host:{key}", server.name, server.monitor_state, detail))
+                if server.monitor_state == "UP":
+                    await self._check_beszel_uptime(server, key)
+
+    async def _check_beszel_uptime(self, server: ServerMetrics, host: str) -> None:
+        if not server.beszel_hub or server.uptime_seconds <= 0:
+            return
+        try:
+            sample = parse_event_time(server.uptime_sampled_at)
+            if sample is None:
+                return
+            lag = datetime.now(timezone.utc) - sample
+            if not timedelta(seconds=-5) <= lag <= timedelta(minutes=3):
+                return
+            boot = sample - timedelta(seconds=server.uptime_seconds)
+        except (ValueError, OverflowError, OSError):
+            return
+        name = f"{server.name} · признаки перезагрузки"
+        detail = "По времени работы системы Beszel определил новую загрузку. Время загрузки приблизительное."
+        await self.storage.apply_beszel_uptime(
+            host, f"{server.beszel_hub}#{server.entity_id}", sample, boot, name, detail,
+            lambda event_id: self._render_event("Beszel", name, detail, boot, event_id),
+        )
 
     async def _check_kuma(self) -> None:
         overview = await self.collector.get_uptime_kuma()
@@ -135,6 +182,27 @@ class MonitoringService:
             "UP" if code == 1 else "DOWN", str(heartbeat.get("msg") or "")[:500],
             parse_event_time(heartbeat.get("time")),
         ))
+
+    async def accept_beszel(self, document: dict) -> None:
+        title, message = document.get("title"), document.get("message")
+        hub = document.get("hub", "default")
+        if any(not isinstance(value, str) or not value.strip() for value in (title, message, hub)):
+            raise ValueError("Beszel notification requires a title and message")
+        title, message, hub = title.strip(), message.strip(), hub.strip()[:80].casefold()
+        if HOST_STATUS.fullmatch(title) and self.settings.BESZEL_ENABLED:
+            return  # The existing polling check reports host reachability.
+        event = parse_threshold(title, message, hub)
+        if event:
+            await self.observe(event)
+        else:
+            if title.casefold() == "test alert":
+                title, message = "Проверка уведомлений Beszel", "Бот получил тестовое сообщение от хаба."
+            title, message = title[:160], message[:500]
+            now = datetime.now(timezone.utc)
+            await self.storage.record_event(
+                "Beszel", title, message, now,
+                lambda event_id: self._render_event("Beszel", title, message, now, event_id),
+            )
 
     async def accept_zabbix(self, document: dict) -> None:
         event_id = str(document.get("event_id", ""))

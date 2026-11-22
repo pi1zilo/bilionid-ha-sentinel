@@ -25,6 +25,7 @@ class Storage:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("BEGIN IMMEDIATE")
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS ha_events (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,9 +44,14 @@ class Storage:
                         server TEXT NOT NULL,
                         message TEXT NOT NULL,
                         severity TEXT NOT NULL DEFAULT 'WARNING',
-                        resolved_at TEXT
+                        resolved_at TEXT,
+                        resolution TEXT NOT NULL DEFAULT ''
                     );
                 """)
+                async with db.execute("PRAGMA table_info(incidents)") as cursor:
+                    columns = {row[1] for row in await cursor.fetchall()}
+                if "resolution" not in columns:
+                    await db.execute("ALTER TABLE incidents ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS observations (
                         source TEXT NOT NULL,
@@ -69,10 +75,19 @@ class Storage:
                     )
                 """)
                 await db.execute("""
+                    CREATE TABLE IF NOT EXISTS beszel_uptime (
+                        host_id TEXT PRIMARY KEY,
+                        feed TEXT NOT NULL,
+                        sampled_at TEXT NOT NULL,
+                        boot_at TEXT NOT NULL
+                    );
+                """)
+                await db.execute("""
                     CREATE INDEX IF NOT EXISTS alert_queue_pending
                     ON alert_queue(retry_at, id)
                     WHERE delivered_at IS NULL AND failed_at IS NULL
                 """)
+                await db.execute("CREATE INDEX IF NOT EXISTS incidents_recent ON incidents(timestamp DESC, id DESC)")
                 await db.commit()
 
     async def apply_observation(self, observation: Observation, render) -> None:
@@ -101,16 +116,19 @@ class Storage:
                 open_id = cursor.lastrowid
                 await db.execute(
                     "INSERT INTO alert_queue (incident_id, kind, text, retry_at) VALUES (?, 'DOWN', ?, ?)",
-                    (open_id, render(observation, event_at, None), utc_text(seen)),
+                    (open_id, render(observation, event_at, open_id), utc_text(seen)),
                 )
             elif observation.state == "UP" and open_id is not None:
-                async with db.execute("SELECT timestamp FROM incidents WHERE id = ?", (open_id,)) as cursor:
+                async with db.execute("SELECT timestamp, message FROM incidents WHERE id = ?", (open_id,)) as cursor:
                     row = await cursor.fetchone()
-                await db.execute("UPDATE incidents SET resolved_at = ? WHERE id = ?", (timestamp, open_id))
+                await db.execute(
+                    "UPDATE incidents SET resolved_at = ?, resolution = ? WHERE id = ?",
+                    (timestamp, observation.detail, open_id),
+                )
                 started = datetime.fromisoformat(row["timestamp"])
                 await db.execute(
                     "INSERT INTO alert_queue (incident_id, kind, text, retry_at) VALUES (?, 'UP', ?, ?)",
-                    (open_id, render(observation, event_at, started), utc_text(seen)),
+                    (open_id, render(observation, event_at, open_id, started, row["message"]), utc_text(seen)),
                 )
                 open_id = None
 
@@ -119,6 +137,58 @@ class Storage:
                 ON CONFLICT (source, entity_id) DO UPDATE
                 SET last_at = excluded.last_at, incident_id = excluded.incident_id""",
                 (*key, timestamp, open_id),
+            )
+            await db.commit()
+
+    async def record_event(self, category: str, server: str, message: str, at: datetime, render=None) -> int:
+        """Keep a standalone event in the journal and optionally enqueue its notification."""
+        async with self._lock, aiosqlite.connect(self.db_path) as db:
+            event_id = await self._insert_event(db, category, server, message, at, render)
+            await db.commit()
+            return event_id
+
+    async def _insert_event(self, db, category: str, server: str, message: str, at: datetime, render) -> int:
+        timestamp = utc_text(at)
+        cursor = await db.execute(
+            """INSERT INTO incidents (timestamp, category, server, message, severity, resolved_at)
+            VALUES (?, ?, ?, ?, 'INFO', ?)""",
+            (timestamp, category, server, message, timestamp),
+        )
+        event_id = cursor.lastrowid
+        if render is not None:
+            await db.execute(
+                "INSERT INTO alert_queue (incident_id, kind, text, retry_at) VALUES (?, 'DOWN', ?, ?)",
+                (event_id, render(event_id), utc_text(datetime.now(timezone.utc))),
+            )
+        return event_id
+
+    async def apply_beszel_uptime(
+        self, host_id: str, feed: str, sample: datetime, boot: datetime,
+        name: str, detail: str, render,
+    ) -> None:
+        """Record a restart and its new baseline together so it survives process restarts."""
+        sampled_at, boot_at = utc_text(sample), utc_text(boot)
+        async with self._lock, aiosqlite.connect(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute(
+                "SELECT feed, sampled_at, boot_at FROM beszel_uptime WHERE host_id = ?", (host_id,)
+            ) as cursor:
+                previous = await cursor.fetchone()
+            if previous:
+                old_feed, old_sample, old_boot = previous
+                if sampled_at <= old_sample:
+                    return
+                # Compare samples from the same hub and allow for jitter in the estimate.
+                if (
+                    feed == old_feed and boot_at >= old_sample
+                    and boot - datetime.fromisoformat(old_boot) > timedelta(seconds=30)
+                ):
+                    await self._insert_event(db, "Beszel", name, detail, boot, render)
+            await db.execute(
+                """INSERT INTO beszel_uptime (host_id, feed, sampled_at, boot_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT (host_id) DO UPDATE
+                SET feed = excluded.feed, sampled_at = excluded.sampled_at, boot_at = excluded.boot_at""",
+                (host_id, feed, sampled_at, boot_at),
             )
             await db.commit()
 
@@ -255,9 +325,9 @@ class Storage:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     """
-                    SELECT id, timestamp, category, server, message, severity, resolved_at
+                    SELECT id, timestamp, category, server, message, severity, resolved_at, resolution
                     FROM incidents
-                    ORDER BY id DESC
+                    ORDER BY timestamp DESC, id DESC
                     LIMIT ?
                     """,
                     (limit,),

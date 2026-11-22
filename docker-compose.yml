@@ -15,6 +15,7 @@ services:
       - "${HA_BIND_IP:-127.0.0.1}:${HA_PORT:-29010}:${HA_PORT:-29010}"
     volumes:
       - ./data:/app/data
+    networks: [default, docker-monitor]
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -29,3 +30,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+
+  docker-monitor-proxy:
+    profiles: [docker-monitor]
+    image: "${PYTHON_IMAGE:-python:3.11-slim@sha256:65bd3d9f1d7fa268dd1909973ba7eb4bdf41f6dcf2cfbe76ba9528b170f3fd79}"
+    command: ["python", "-I", "-B", "/docker-monitor-proxy.py"]
+    restart: unless-stopped
+    read_only: true
+    networks: [docker-monitor]
+    volumes:
+      - ./app/monitoring/docker/proxy.py:/docker-monitor-proxy.py:ro
+      - type: bind
+        source: /var/run/docker.sock
+        target: /run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+networks:
+  docker-monitor:
+    internal: true

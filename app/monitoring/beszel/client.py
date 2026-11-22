@@ -185,7 +185,7 @@ class BeszelClient:
         if not isinstance(load, list) or len(load) < 3:
             load = [0.0, 0.0, 0.0]
 
-        uptime_sec = int(info.get("u", 0))
+        uptime_sec = int(info.get("u") or 0)
         uptime_s = format_uptime(uptime_sec) if uptime_sec > 0 else "Н/Д"
 
         temp = info.get("dt")
@@ -212,6 +212,7 @@ class BeszelClient:
             load_15m=round(float(load[2]), 2),
             uptime_str=uptime_s,
             uptime_seconds=uptime_sec,
+            uptime_sampled_at=item.get("updated") or "",
             temperature=temp_val,
             last_updated=last_updated,
             source="beszel",
@@ -276,7 +277,7 @@ class BeszelClient:
         self.hub_available = {url: items is not None for url, items in zip(hubs, snapshots)}
         self.active_hub = next((url for url, items in zip(hubs, snapshots) if items), "—")
         servers: dict[str, ServerMetrics] = {}
-        for items in snapshots:
+        for hub_url, items in zip(hubs, snapshots):
             for item in items or ():
                 try:
                     metric = self._parse_system_record(item)
@@ -284,6 +285,7 @@ class BeszelClient:
                     logger.warning("Skipping an invalid Beszel record")
                     continue
                 key = (metric.hostname or metric.name).casefold()
+                metric.beszel_hub = hub_url
                 servers.setdefault(key, metric)
         return list(servers.values())
 
