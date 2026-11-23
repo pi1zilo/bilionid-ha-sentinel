@@ -6,6 +6,7 @@ and HA peer federation.
 import asyncio
 from pathlib import Path
 import logging
+import re
 from typing import List, Optional
 import docker
 
@@ -20,27 +21,27 @@ class DockerMonitor:
         server_name: str = "Local",
         socket_path: str = "/var/run/docker.sock",
         enabled: bool = True,
+        proxy_url: str = "",
     ):
         self.server_name = server_name
         self.socket_path = socket_path
         self.enabled = enabled
+        self.proxy_url = proxy_url
         self._client: Optional[docker.DockerClient] = None
-        self.last_error: Optional[str] = None
 
     def _get_client(self) -> Optional[docker.DockerClient]:
         if not self.enabled:
-            self.last_error = "Мониторинг Docker отключен"
             return None
         if self._client is not None:
             return self._client
         try:
+            if self.proxy_url:
+                self._client = docker.DockerClient(base_url=self.proxy_url, timeout=4)
+                return self._client
             if Path(self.socket_path).exists():
                 self._client = docker.DockerClient(base_url=f"unix://{self.socket_path}", timeout=4)
                 return self._client
-            else:
-                self.last_error = f"Сокет {self.socket_path} не найден"
         except Exception as e:
-            self.last_error = f"Ошибка инициализации Docker: {e}"
             logger.debug("Docker client initialization skipped: %s", e)
         return None
 
@@ -56,28 +57,24 @@ class DockerMonitor:
 
         containers_list: List[ContainerInfo] = []
         try:
-            for c in client.containers.list(all=True):
-                # Health status if available
-                health = None
-                attrs = c.attrs or {}
-                state_obj = attrs.get("State", {})
-                if "Health" in state_obj:
-                    health = state_obj["Health"].get("Status")
-
+            for container in client.api.containers(all=True):
+                state = container.get("State", "unknown")
+                status = container.get("Status", state)
+                health = re.search(r"\((?:health: )?(healthy|unhealthy|starting)\)$", status)
+                short_id = container["Id"][:12]
+                names = container.get("Names") or [short_id]
                 containers_list.append(
                     ContainerInfo(
                         server=self.server_name,
-                        id=c.short_id,
-                        name=c.name.lstrip("/"),
-                        image=c.image.tags[0] if c.image.tags else str(c.image.id[:12]),
-                        state=c.status,
-                        status=c.attrs.get("Status", c.status),
-                        health=health,
+                        id=short_id,
+                        name=names[0].lstrip("/"),
+                        image=container.get("Image", ""),
+                        state=state,
+                        status=status,
+                        health=health.group(1) if health else None,
                     )
                 )
-            self.last_error = None
         except Exception as e:
-            self.last_error = f"Ошибка доступа к Docker: {e}"
             logger.warning("Error querying Docker containers: %s", e)
 
         return containers_list

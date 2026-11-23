@@ -1,174 +1,116 @@
-"""
-HA inter-node HTTP server running over Tailscale private network.
-"""
+"""Liveness, authenticated peer views and monitoring webhooks."""
 
-import asyncio
-from datetime import datetime, timezone
 import logging
-from typing import Any, Callable, Dict, Optional
+from hmac import compare_digest
+
 from aiohttp import web
 
 from app.core.config import Settings
+from app.ha.supervisor import HASupervisor
 from app.monitoring.docker.client import DockerMonitor
+from app.monitoring.server_logs import DEFAULT_LOG_LINES, JournalUnavailable, parse_log_lines, read_server_journal
+from app.services.monitoring import MonitoringService
 
 logger = logging.getLogger("bilionid_ha.http_server")
 
 
+def has_secret(request: web.Request, header: str, expected: str) -> bool:
+    supplied = request.headers.get(header, "")
+    return bool(expected) and compare_digest(supplied.encode(), expected.encode())
+
+
 class HAHttpServer:
     def __init__(
-        self,
-        settings: Settings,
-        get_ha_info: Callable[[], Dict[str, Any]],
-        on_yield_request: Optional[Callable[[], Any]] = None,
-        on_force_role_request: Optional[Callable[[str], Any]] = None,
-        docker_monitor: Optional[DockerMonitor] = None,
-        get_local_metrics: Optional[Callable[[], Any]] = None,
+        self, settings: Settings, supervisor: HASupervisor, monitoring: MonitoringService,
+        docker_monitor: DockerMonitor,
     ):
         self.settings = settings
-        self.get_ha_info = get_ha_info
-        self.on_yield_request = on_yield_request
-        self.on_force_role_request = on_force_role_request
+        self.supervisor = supervisor
+        self.monitoring = monitoring
         self.docker_monitor = docker_monitor
-        self.get_local_metrics = get_local_metrics
-        self.app = web.Application()
-        self.runner: Optional[web.AppRunner] = None
-        self.site: Optional[web.TCPSite] = None
-        self._setup_routes()
+        self.app = web.Application(client_max_size=64 * 1024)
+        self.app.router.add_get("/health", self.health)
+        self.app.router.add_get("/ready", self.ready)
+        if settings.HA_PEER_ENABLED:
+            self.app.router.add_get("/ha/status", self.peer_status)
+            self.app.router.add_get("/ha/containers", self.peer_containers)
+            self.app.router.add_get("/ha/incidents", self.peer_incidents)
+            if settings.SERVER_LOGS_ENABLED:
+                self.app.router.add_get("/ha/logs", self.peer_logs)
+        if settings.polling_enabled and settings.BESZEL_WEBHOOK_SECRET:
+            self.app.router.add_post("/events/beszel", self.beszel_event)
+        if settings.polling_enabled and settings.UPTIME_KUMA_WEBHOOK_SECRET:
+            self.app.router.add_post("/events/kuma", self.kuma_event)
+        if settings.polling_enabled and settings.ZABBIX_WEBHOOK_SECRET:
+            self.app.router.add_post("/events/zabbix", self.zabbix_event)
+        self.runner = web.AppRunner(self.app, access_log=None)
 
-    def _setup_routes(self) -> None:
-        self.app.router.add_get("/health", self.handle_health)
-        self.app.router.add_get("/ha/status", self.handle_ha_status)
-        self.app.router.add_get("/ha/containers", self.handle_containers)
-        self.app.router.add_get("/ha/metrics", self.handle_metrics)
-        self.app.router.add_post("/ha/heartbeat", self.handle_heartbeat)
-        self.app.router.add_post("/ha/yield", self.handle_yield)
-        self.app.router.add_post("/ha/force_role", self.handle_force_role)
+    async def health(self, request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
 
-    def _verify_secret(self, request: web.Request) -> bool:
-        secret = request.headers.get("X-HA-Secret")
-        if not secret:
-            auth_header = request.headers.get("Authorization", "")
-            if auth_header.startswith("Bearer "):
-                secret = auth_header[7:]
-        return secret == self.settings.HA_SECRET_KEY
+    async def ready(self, request: web.Request) -> web.Response:
+        info = self.supervisor.get_ha_info()
+        ok = not info["polling_enabled"] or info["polling_ready"]
+        return web.json_response({"status": "ready" if ok else "degraded"}, status=200 if ok else 503)
 
-    async def handle_health(self, request: web.Request) -> web.Response:
-        """Health endpoint for local and peer probes."""
-        ha_info = self.get_ha_info()
-        return web.json_response(
-            {
-                "status": "ok",
-                "node_name": self.settings.NODE_NAME,
-                "role": self.settings.NODE_ROLE.value,
-                "state": ha_info.get("state", "UNKNOWN"),
-                "is_polling": ha_info.get("is_polling", False),
-                "uptime_seconds": ha_info.get("uptime_seconds", 0),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+    def _authorize_peer(self, request: web.Request) -> None:
+        if not has_secret(request, "X-HA-Secret", self.settings.HA_SECRET_KEY):
+            raise web.HTTPUnauthorized()
 
-    async def handle_ha_status(self, request: web.Request) -> web.Response:
-        """Detailed HA status endpoint with authentication."""
-        if not self._verify_secret(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
+    async def peer_status(self, request: web.Request) -> web.Response:
+        self._authorize_peer(request)
+        info = self.supervisor.get_ha_info()
+        seen = info["last_peer_seen"]
+        info["last_peer_seen"] = seen.isoformat() if seen else None
+        return web.json_response(info)
 
-        ha_info = self.get_ha_info()
-        return web.json_response(ha_info)
+    async def peer_containers(self, request: web.Request) -> web.Response:
+        self._authorize_peer(request)
+        containers = await self.docker_monitor.get_containers()
+        return web.json_response({"containers": [item.model_dump() for item in containers]})
 
-    async def handle_containers(self, request: web.Request) -> web.Response:
-        """Returns local Docker containers to peer for cross-node views."""
-        if not self._verify_secret(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
+    async def peer_incidents(self, request: web.Request) -> web.Response:
+        self._authorize_peer(request)
+        incidents = await self.monitoring.storage.get_recent_incidents(limit=10)
+        return web.json_response({"node": self.settings.NODE_NAME, "incidents": incidents})
 
-        containers = []
-        if self.docker_monitor:
-            raw_containers = await self.docker_monitor.get_containers()
-            containers = [c.model_dump() for c in raw_containers]
-
-        return web.json_response({"node": self.settings.NODE_NAME, "containers": containers})
-
-    async def handle_metrics(self, request: web.Request) -> web.Response:
-        """Returns local host metrics (psutil fallback) to peer for cross-node views."""
-        if not self._verify_secret(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
-
-        metrics = None
-        if self.get_local_metrics:
-            try:
-                res = self.get_local_metrics()
-                if asyncio.iscoroutine(res):
-                    res = await res
-                if hasattr(res, "model_dump"):
-                    metrics = res.model_dump()
-                elif isinstance(res, dict):
-                    metrics = res
-            except Exception as e:
-                logger.error("Error generating local metrics: %s", e)
-
-        if metrics:
-            return web.json_response({"node": self.settings.NODE_NAME, "metrics": metrics})
-        return web.json_response({"error": "Metrics unavailable"}, status=503)
-
-    async def handle_heartbeat(self, request: web.Request) -> web.Response:
-        """Endpoint to receive incoming heartbeat from peer."""
-        if not self._verify_secret(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
-
+    async def peer_logs(self, request: web.Request) -> web.Response:
+        self._authorize_peer(request)
         try:
-            data = await request.json()
-        except Exception:
-            data = {}
-
-        peer = data.get("source_node", "Unknown")
-        logger.debug("Received heartbeat from peer %s", peer)
-        return web.json_response({"status": "received", "node": self.settings.NODE_NAME})
-
-    async def handle_yield(self, request: web.Request) -> web.Response:
-        """Yield polling to Primary node upon recovery."""
-        if not self._verify_secret(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
-
-        if self.on_yield_request:
-            res = self.on_yield_request()
-            if asyncio.iscoroutine(res):
-                await res
-            logger.info("Yielded polling upon peer request")
-            return web.json_response({"status": "yielded", "node": self.settings.NODE_NAME})
-
-        return web.json_response({"status": "no_action"}, status=200)
-
-    async def handle_force_role(self, request: web.Request) -> web.Response:
-        """Force role change by owner/admin."""
-        if not self._verify_secret(request):
-            return web.json_response({"error": "Unauthorized"}, status=401)
-
+            lines = parse_log_lines(request.query.get("lines", str(DEFAULT_LOG_LINES)))
+        except ValueError:
+            raise web.HTTPBadRequest(text="Invalid journal line count") from None
         try:
-            data = await request.json()
-            new_role = data.get("role")
-            if new_role and self.on_force_role_request:
-                res = self.on_force_role_request(new_role)
-                if asyncio.iscoroutine(res):
-                    await res
-                return web.json_response({"status": "role_updated", "role": new_role})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
+            text = await read_server_journal(lines)
+        except JournalUnavailable:
+            raise web.HTTPServiceUnavailable(text="System journal unavailable") from None
+        return web.Response(text=text, content_type="text/plain", charset="utf-8")
 
-        return web.json_response({"error": "Invalid request"}, status=400)
+    async def _event(self, request: web.Request, secret: str, accept) -> web.Response:
+        if not has_secret(request, "X-Monitor-Secret", secret):
+            raise web.HTTPUnauthorized()
+        try:
+            document = await request.json()
+            if not isinstance(document, dict):
+                raise ValueError("Expected a JSON object")
+            await accept(document)
+        except (ValueError, TypeError, OverflowError, OSError):
+            raise web.HTTPBadRequest(text="Invalid event") from None
+        return web.Response(status=204)
+
+    async def kuma_event(self, request: web.Request) -> web.Response:
+        return await self._event(request, self.settings.UPTIME_KUMA_WEBHOOK_SECRET, self.monitoring.accept_kuma)
+
+    async def beszel_event(self, request: web.Request) -> web.Response:
+        return await self._event(request, self.settings.BESZEL_WEBHOOK_SECRET, self.monitoring.accept_beszel)
+
+    async def zabbix_event(self, request: web.Request) -> web.Response:
+        return await self._event(request, self.settings.ZABBIX_WEBHOOK_SECRET, self.monitoring.accept_zabbix)
 
     async def start(self) -> None:
-        """Starts HTTP server on HA_HOST and HA_PORT."""
-        self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        self.site = web.TCPSite(self.runner, self.settings.HA_HOST, self.settings.HA_PORT)
-        await self.site.start()
-        logger.info(
-            "HA HTTP Server listening on %s:%d (Tailscale private network)",
-            self.settings.HA_HOST,
-            self.settings.HA_PORT,
-        )
+        await web.TCPSite(self.runner, self.settings.HA_HOST, self.settings.HA_PORT).start()
+        logger.info("Health server listening on port %d", self.settings.HA_PORT)
 
     async def stop(self) -> None:
-        """Stops HTTP server."""
-        if self.runner:
-            await self.runner.cleanup()
-            logger.info("HA HTTP Server stopped")
+        await self.runner.cleanup()

@@ -5,26 +5,36 @@ Handles clean shutdown on SIGINT/SIGTERM.
 """
 
 import asyncio
-import logging
 import signal
 import sys
-from typing import Optional
 
 from app.bot.bot import BotManager
-from app.core.config import Settings, get_settings
+from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.ha.supervisor import HASupervisor
+from app.ha.http_server import HAHttpServer
 from app.monitoring.collector import MetricsCollector
 from app.monitoring.docker.client import DockerMonitor
 from app.storage.db import Storage
+from app.services.monitoring import MonitoringService
 
 
 async def run_app() -> None:
     settings = get_settings()
+    settings.validate_runtime()
     logger = setup_logger(
         name="bilionid_ha",
         level=settings.LOG_LEVEL,
         json_format=settings.LOG_FORMAT_JSON,
+        secrets=(
+            settings.TELEGRAM_BOT_TOKEN, settings.HA_SECRET_KEY,
+            settings.BESZEL_PASSWORD, settings.BESZEL_AUTH_TOKEN,
+            settings.BESZEL_BACKUP_PASSWORD, settings.BESZEL_BACKUP_AUTH_TOKEN,
+            settings.BESZEL_WEBHOOK_SECRET,
+            settings.UPTIME_KUMA_PASSWORD, settings.UPTIME_KUMA_API_KEY,
+            settings.UPTIME_KUMA_WEBHOOK_SECRET, settings.ZABBIX_API_TOKEN,
+            settings.ZABBIX_WEBHOOK_SECRET,
+        ),
     )
 
     logger.info(
@@ -43,51 +53,36 @@ async def run_app() -> None:
         server_name=settings.NODE_NAME,
         socket_path=settings.DOCKER_SOCKET_PATH,
         enabled=settings.DOCKER_MONITOR_ENABLED,
+        proxy_url=settings.DOCKER_PROXY_URL,
     )
 
     # 3. Monitoring aggregator
-    collector = MetricsCollector(settings)
-
-    # Placeholders for cross-reference
-    bot_manager_ref: list[Optional[BotManager]] = [None]
-
-    # HA supervisor callbacks
-    async def start_polling_callback() -> None:
-        if bot_manager_ref[0]:
-            await bot_manager_ref[0].start_polling()
-
-    async def stop_polling_callback() -> None:
-        if bot_manager_ref[0]:
-            await bot_manager_ref[0].stop_polling()
-
-    async def send_alert_callback(msg: str) -> None:
-        if bot_manager_ref[0]:
-            await bot_manager_ref[0].send_alert_message(msg)
-
-    # 4. Initialize HA Supervisor
-    supervisor = HASupervisor(
-        settings=settings,
-        storage=storage,
-        start_bot_callback=start_polling_callback,
-        stop_bot_callback=stop_polling_callback,
-        send_alert_callback=send_alert_callback,
-        docker_monitor=docker_monitor,
-        get_local_metrics=lambda: collector.beszel.get_local_fallback_metrics(settings.NODE_NAME),
-    )
-
-    # 5. Initialize Telegram Bot Manager
+    collector = MetricsCollector(settings, docker_monitor)
+    monitoring = MonitoringService(settings, storage, collector)
+    supervisor = HASupervisor(settings, monitoring)
+    http_server = HAHttpServer(settings, supervisor, monitoring, docker_monitor)
     bot_manager = BotManager(
         settings=settings,
         storage=storage,
         collector=collector,
         ha_supervisor=supervisor,
     )
-    bot_manager_ref[0] = bot_manager
+    def bot_status() -> dict:
+        stamp = bot_manager.last_poll_ok
+        return {
+            "is_polling": bot_manager.is_polling,
+            "polling_ready": bot_manager.polling_ready,
+            "last_poll_ok": stamp.isoformat() if stamp else None,
+            "last_poll_error": bot_manager.last_poll_error,
+        }
 
-    # 6. Start HA Supervisor (which starts polling if role is PRIMARY)
-    await supervisor.start()
+    async def send_queued_alert(message: str) -> None:
+        if settings.polling_enabled and bot_manager.last_poll_error == "TelegramConflictError":
+            raise RuntimeError("Operator must resolve the Telegram polling conflict")
+        await bot_manager.send_alert_message(message)
 
-    # 7. Graceful shutdown handler
+    supervisor.bot_status = bot_status
+    tasks = []
     stop_event = asyncio.Event()
 
     def request_shutdown(sig_name: str) -> None:
@@ -98,24 +93,26 @@ async def run_app() -> None:
     if sys.platform != "win32":
         for s in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(s, lambda s=s: request_shutdown(s.name))
-    else:
-        # Windows signal handling support
-        for s in (signal.SIGTERM, signal.SIGINT):
-            try:
-                signal.signal(
-                    s,
-                    lambda sig, frame, name=s.name: loop.call_soon_threadsafe(request_shutdown, name),
-                )
-            except Exception:
-                pass
-
     try:
+        await http_server.start()
+        await storage.record_ha_event(
+            "POLLING_ENABLED" if settings.polling_enabled else "STANDBY_STARTUP",
+            settings.NODE_NAME,
+        )
+        if settings.polling_enabled:
+            await bot_manager.start_polling()
+            tasks.extend(monitoring.start_checks())
+        if settings.HA_PEER_ENABLED:
+            tasks.append(asyncio.create_task(supervisor.run()))
+        if settings.polling_enabled or settings.HA_WATCH_PRIMARY:
+            tasks.append(asyncio.create_task(monitoring.deliver(send_queued_alert)))
         await stop_event.wait()
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
     finally:
         logger.info("Shutting down BilioniD HA Bot components...")
-        await supervisor.stop()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await http_server.stop()
         await bot_manager.close()
         logger.info("Shutdown complete.")
 

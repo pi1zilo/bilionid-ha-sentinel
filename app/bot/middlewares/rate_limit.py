@@ -35,9 +35,9 @@ class RateLimitMiddleware(BaseMiddleware):
 
         if len(self.user_requests[user.id]) >= self.max_per_minute:
             logger.warning("Rate limit exceeded for user %s", user.id)
-            warn_text = "⚠️ **Превышен лимит запросов**\nПожалуйста, подождите несколько секунд перед следующим действием."
+            warn_text = "⚠️ Превышен лимит запросов\nПожалуйста, подождите несколько секунд перед следующим действием."
             if isinstance(event, Message):
-                await event.answer(warn_text, parse_mode="Markdown")
+                await event.answer(warn_text, parse_mode=None)
             elif isinstance(event, CallbackQuery):
                 await event.answer("⚠️ Слишком много запросов. Подождите.", show_alert=True)
             return

@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 class ServerMetrics(BaseModel):
     name: str = Field(description="Server identifier name")
+    entity_id: str = ""
+    monitor_state: str = "UNKNOWN"
     hostname: str = Field(default="", description="Server hostname or IP")
     status: str = Field(default="Online", description="Online, Degraded, or Offline")
     is_online: bool = Field(default=True)
@@ -24,6 +26,8 @@ class ServerMetrics(BaseModel):
     load_15m: float = Field(default=0.0)
     uptime_str: str = Field(default="Unknown")
     uptime_seconds: int = Field(default=0)
+    uptime_sampled_at: str = ""
+    beszel_hub: str = ""
     docker_containers_total: int = Field(default=0)
     docker_containers_running: int = Field(default=0)
     docker_containers_stopped: int = Field(default=0)
@@ -54,6 +58,7 @@ class UptimeKumaMonitor(BaseModel):
     uptime_24h: Optional[float] = Field(default=None)
     last_check: Optional[str] = Field(default=None)
     msg: Optional[str] = Field(default=None)
+    tags: list[str] = Field(default_factory=list)
 
 
 class UptimeKumaOverview(BaseModel):
@@ -63,3 +68,4 @@ class UptimeKumaOverview(BaseModel):
     up_count: int = Field(default=0)
     down_count: int = Field(default=0)
     error_message: Optional[str] = Field(default=None)
+    state: str = "UNKNOWN"

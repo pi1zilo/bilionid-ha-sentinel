@@ -1,0 +1,9 @@
+.git
+.deploy.lock
+.env*
+data
+*.tar.gz
+*.zip
+__pycache__
+.pytest_cache
+.venv

@@ -4,31 +4,52 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-    image: bilionid-ha-sentinel:latest
-    container_name: bilionid-ha-sentinel
+        PYTHON_IMAGE: "${PYTHON_IMAGE:-python:3.11-slim@sha256:65bd3d9f1d7fa268dd1909973ba7eb4bdf41f6dcf2cfbe76ba9528b170f3fd79}"
+    image: "bilionid-ha-bot:${IMAGE_TAG:-dev}"
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     restart: unless-stopped
+    stop_grace_period: 25s
     env_file:
       - .env
     ports:
-      # Expose HA endpoint for inter-node communication over Tailscale
-      - "${HA_PORT:-29010}:${HA_PORT:-29010}"
+      - "${HA_BIND_IP:-127.0.0.1}:${HA_PORT:-29010}:${HA_PORT:-29010}"
     volumes:
       - ./data:/app/data
-      # Docker socket mount for container state monitoring (read-only for security)
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /etc/localtime:/etc/localtime:ro
+    networks: [default, docker-monitor]
     security_opt:
       - no-new-privileges:true
+    cap_drop: [ALL]
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import os, sys, urllib.request; port = os.environ.get('HA_PORT', '29010'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/health').getcode() == 200 else 1)\""]
+      test: ["CMD", "python", "-m", "app.core.healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 5s
+
+  docker-monitor-proxy:
+    profiles: [docker-monitor]
+    image: "${PYTHON_IMAGE:-python:3.11-slim@sha256:65bd3d9f1d7fa268dd1909973ba7eb4bdf41f6dcf2cfbe76ba9528b170f3fd79}"
+    command: ["python", "-I", "-B", "/docker-monitor-proxy.py"]
+    restart: unless-stopped
+    read_only: true
+    networks: [docker-monitor]
+    volumes:
+      - ./app/monitoring/docker/proxy.py:/docker-monitor-proxy.py:ro
+      - type: bind
+        source: /var/run/docker.sock
+        target: /run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+networks:
+  docker-monitor:
+    internal: true

@@ -1,0 +1,16 @@
+services:
+  bot:
+    environment:
+      SERVER_LOGS_ENABLED: "true"
+    build:
+      args:
+        INSTALL_JOURNALCTL: "true"
+    group_add:
+      - "${SERVER_JOURNAL_GID:?Set SERVER_JOURNAL_GID to the host systemd-journal group ID}"
+    volumes:
+      - type: bind
+        source: "${SERVER_JOURNAL_DIR:?Set SERVER_JOURNAL_DIR to the host machine journal directory}"
+        target: /host-journal
+        read_only: true
+        bind:
+          create_host_path: false

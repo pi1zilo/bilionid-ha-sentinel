@@ -5,7 +5,8 @@ Loads settings from environment variables or .env file with validation and secre
 
 from enum import Enum
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Optional
+from zoneinfo import ZoneInfo
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,15 +14,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class NodeRole(str, Enum):
     PRIMARY = "PRIMARY"
     STANDBY = "STANDBY"
-
-
-class NodeState(str, Enum):
-    LEADER_ACTIVE = "LEADER_ACTIVE"       # Active polling instance
-    FOLLOWER_PASSIVE = "FOLLOWER_PASSIVE" # Standby instance, polling stopped
-    FAILOVER_TAKEOVER = "FAILOVER_TAKEOVER" # Promoted standby during primary failure
-    RECOVERING = "RECOVERING"             # Handing over back to primary
-    DEGRADED = "DEGRADED"                 # Ambiguous or error state
-    MANUAL_OVERRIDE = "MANUAL_OVERRIDE"   # Manually forced state
 
 
 class Settings(BaseSettings):
@@ -38,25 +30,26 @@ class Settings(BaseSettings):
         description="Role of this node: PRIMARY (Main) or STANDBY (Backup)"
     )
     NODE_NAME: str = Field(
-        default="Primary-Node",
+        default="BilioniD-factories",
         description="Human readable name of this node"
     )
     TAILSCALE_IP: str = Field(
-        default="100.64.0.1",
+        default="100.68.106.100",
         description="Tailscale IP of this node"
     )
     PEER_NODE_NAME: str = Field(
-        default="Backup-Node",
+        default="SUSLIKVPN",
         description="Human readable name of the peer node"
     )
     PEER_TAILSCALE_IP: str = Field(
-        default="100.64.0.2",
+        default="100.77.242.10",
         description="Tailscale IP of the other node"
     )
 
     # High Availability & Inter-node Communication
     HA_PORT: int = Field(
         default=29010,
+        ge=1, le=65535,
         description="Port for internal HA communication over Tailscale"
     )
     HA_HOST: str = Field(
@@ -64,47 +57,30 @@ class Settings(BaseSettings):
         description="Bind host for HA HTTP server"
     )
     HA_SECRET_KEY: str = Field(
-        default="default-secret-change-in-production-32chars",
+        default="",
         description="Pre-shared authentication key for inter-node communication"
     )
+    HA_PEER_ENABLED: bool = False
+    HA_PEER_PORT: int | None = Field(default=None, ge=1, le=65535)
+    HA_WATCH_PRIMARY: bool = False
     HA_HEARTBEAT_INTERVAL_SEC: float = Field(
         default=5.0,
+        gt=0,
         description="Interval between peer heartbeat / health checks in seconds"
     )
-    HA_FAILOVER_TIMEOUT_SEC: float = Field(
-        default=30.0,
-        description="Time without healthy heartbeat before considering failover (seconds)"
-    )
-    HA_RECOVERY_TIMEOUT_SEC: float = Field(
-        default=30.0,
-        description="Time Primary must be continuously healthy before yielding back (seconds)"
-    )
-    HA_LEASE_DURATION_SEC: float = Field(
-        default=15.0,
-        description="Duration of active polling lease before expiration (seconds)"
-    )
-
     # Telegram Bot Settings
     TELEGRAM_BOT_TOKEN: str = Field(
         default="",
         description="Telegram Bot API Token"
     )
-    TELEGRAM_PROXY_URL: Optional[str] = Field(
-        default=None,
-        description="Optional HTTP/HTTPS proxy URL for Telegram Bot API (e.g. http://192.168.10.100:10809)"
-    )
     TELEGRAM_CHAT_ID: int = Field(
         default=0,
-        description="Telegram Chat ID for operational alerts"
+        le=0,
+        description="Telegram group ID for operational alerts"
     )
-    TELEGRAM_ADMIN_USER_ID: Union[int, str] = Field(
-        default=0,
-        description="Telegram User ID(s) of authorized admins (single ID, comma-separated, or '*' for all)"
-    )
-    DISABLE_AUTH: bool = Field(
-        default=False,
-        description="Disable authorization check completely to allow everyone in all chats"
-    )
+    TELEGRAM_COMMAND_CHAT_ID: int = Field(default=0, le=0)
+    TELEGRAM_POLLING_ENABLED: bool | None = None
+    TELEGRAM_API_BASE: str = ""
     RATE_LIMIT_COMMANDS_PER_MIN: int = Field(
         default=30,
         description="Max commands per minute per user"
@@ -112,11 +88,12 @@ class Settings(BaseSettings):
 
     # Beszel Hub Monitoring
     BESZEL_MAIN_URL: str = Field(
-        default="http://100.64.0.1:29001",
+        default="http://100.68.106.100:29001",
         description="URL of Main Beszel Hub"
     )
+    BESZEL_ENABLED: bool = True
     BESZEL_BACKUP_URL: str = Field(
-        default="http://100.64.0.2:29000",
+        default="http://100.77.242.10:29000",
         description="URL of Backup Beszel Hub"
     )
     BESZEL_USERNAME: Optional[str] = Field(
@@ -131,6 +108,10 @@ class Settings(BaseSettings):
         default=None,
         description="Static Beszel / PocketBase auth token if provided"
     )
+    BESZEL_BACKUP_USERNAME: str = ""
+    BESZEL_BACKUP_PASSWORD: str = ""
+    BESZEL_BACKUP_AUTH_TOKEN: str = ""
+    BESZEL_WEBHOOK_SECRET: str = ""
 
     # Uptime Kuma Monitoring (Optional)
     UPTIME_KUMA_ENABLED: bool = Field(
@@ -138,7 +119,7 @@ class Settings(BaseSettings):
         description="Enable Uptime Kuma integration"
     )
     UPTIME_KUMA_URL: str = Field(
-        default="http://100.64.0.1:29000",
+        default="http://100.68.106.100:29000",
         description="URL of Uptime Kuma on Main"
     )
     UPTIME_KUMA_API_KEY: Optional[str] = Field(
@@ -153,6 +134,17 @@ class Settings(BaseSettings):
         default=None,
         description="Password for Uptime Kuma"
     )
+    UPTIME_KUMA_STATUS_PAGE_SLUG: str = ""
+    UPTIME_KUMA_WEBHOOK_SECRET: str = ""
+
+    ZABBIX_URL: str = ""
+    ZABBIX_API_TOKEN: str = ""
+    ZABBIX_WEBHOOK_SECRET: str = ""
+
+    MONITOR_INTERVAL_SEC: float = Field(default=15, gt=0)
+    MONITOR_SOURCE_FAILURES: int = Field(default=2, ge=1)
+    ALERT_TIMEZONE: str = "Europe/Moscow"
+    SERVER_LOGS_ENABLED: bool = False
 
     # Docker Monitoring
     DOCKER_SOCKET_PATH: str = Field(
@@ -160,9 +152,10 @@ class Settings(BaseSettings):
         description="Path to Docker socket for local container inspection"
     )
     DOCKER_MONITOR_ENABLED: bool = Field(
-        default=True,
+        default=False,
         description="Enable local Docker container status monitoring"
     )
+    DOCKER_PROXY_URL: str = ""
 
     # Storage & Logging
     DATA_DIR: Path = Field(
@@ -184,23 +177,6 @@ class Settings(BaseSettings):
         v = v.strip()
         return v
 
-    @field_validator("TELEGRAM_ADMIN_USER_ID", mode="before")
-    @classmethod
-    def validate_admin_user_id(cls, v: Any) -> str:
-        if v is None:
-            return "0"
-        return str(v).strip()
-
-    @field_validator("TELEGRAM_CHAT_ID", mode="before")
-    @classmethod
-    def validate_chat_id(cls, v: Any) -> int:
-        if v is None or str(v).strip() == "":
-            return 0
-        try:
-            return int(str(v).strip())
-        except Exception:
-            return 0
-
     @property
     def is_primary(self) -> bool:
         return self.NODE_ROLE == NodeRole.PRIMARY
@@ -210,26 +186,16 @@ class Settings(BaseSettings):
         return self.NODE_ROLE == NodeRole.STANDBY
 
     @property
-    def allowed_admin_ids(self) -> List[int]:
-        val = str(self.TELEGRAM_ADMIN_USER_ID).strip()
-        if val in ("*", "all", "0", "") or self.DISABLE_AUTH:
-            return []
-        import re
-        ids: List[int] = []
-        for part in re.split(r"[,;|\s]+", val):
-            part = part.strip()
-            if part.isdigit() and int(part) != 0:
-                ids.append(int(part))
-        return ids
+    def polling_enabled(self) -> bool:
+        return self.is_primary if self.TELEGRAM_POLLING_ENABLED is None else self.TELEGRAM_POLLING_ENABLED
 
     @property
-    def primary_admin_id(self) -> int:
-        ids = self.allowed_admin_ids
-        return ids[0] if ids else 0
+    def command_chat_id(self) -> int:
+        return self.TELEGRAM_COMMAND_CHAT_ID or self.TELEGRAM_CHAT_ID
 
     @property
     def peer_ha_url(self) -> str:
-        return f"http://{self.PEER_TAILSCALE_IP}:{self.HA_PORT}"
+        return f"http://{self.PEER_TAILSCALE_IP}:{self.HA_PEER_PORT or self.HA_PORT}"
 
     @property
     def local_ha_url(self) -> str:
@@ -249,6 +215,12 @@ class Settings(BaseSettings):
             "BESZEL_AUTH_TOKEN",
             "UPTIME_KUMA_PASSWORD",
             "UPTIME_KUMA_API_KEY",
+            "BESZEL_BACKUP_PASSWORD",
+            "BESZEL_BACKUP_AUTH_TOKEN",
+            "BESZEL_WEBHOOK_SECRET",
+            "UPTIME_KUMA_WEBHOOK_SECRET",
+            "ZABBIX_API_TOKEN",
+            "ZABBIX_WEBHOOK_SECRET",
         }
         for k in sensitive_keys:
             if d.get(k):
@@ -258,6 +230,25 @@ class Settings(BaseSettings):
                 else:
                     d[k] = "***"
         return d
+
+    def validate_runtime(self) -> None:
+        """Validate requirements for the features enabled on this node."""
+        if self.HA_PEER_ENABLED and (
+            len(self.HA_SECRET_KEY) < 32
+            or self.HA_SECRET_KEY.startswith(("default-secret", "change-this"))
+        ):
+            raise ValueError("HA_SECRET_KEY must be a unique secret of at least 32 characters")
+        if self.HA_WATCH_PRIMARY and (not self.HA_PEER_ENABLED or not self.is_standby):
+            raise ValueError("HA_WATCH_PRIMARY requires a STANDBY with HA_PEER_ENABLED")
+        if self.polling_enabled or self.HA_WATCH_PRIMARY:
+            if not self.TELEGRAM_BOT_TOKEN or not self.TELEGRAM_CHAT_ID:
+                raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
+        for secret in (self.BESZEL_WEBHOOK_SECRET, self.UPTIME_KUMA_WEBHOOK_SECRET, self.ZABBIX_WEBHOOK_SECRET):
+            if secret and len(secret) < 32:
+                raise ValueError("Webhook secrets must be at least 32 characters")
+        if bool(self.ZABBIX_URL) != bool(self.ZABBIX_API_TOKEN):
+            raise ValueError("ZABBIX_URL and ZABBIX_API_TOKEN must be set together")
+        ZoneInfo(self.ALERT_TIMEZONE)
 
 
 # Global settings instance placeholder (instantiated in main / tests)
