@@ -12,13 +12,16 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramConflictError
+from aiogram.exceptions import TelegramAPIError, TelegramConflictError
 from aiogram.methods import GetUpdates
+from aiogram.types import BotCommand, BotCommandScopeChat, LinkPreviewOptions
 
+from app.bot.commands import COMMANDS
 from app.bot.handlers import admin, alerts, containers, ha, monitoring, start, status
 from app.bot.middlewares.auth import ChatAuthMiddleware
 from app.bot.middlewares.rate_limit import RateLimitMiddleware
 from app.core.config import Settings
+from app.ha.handover import REQUEST_SECONDS
 from app.ha.supervisor import HASupervisor
 from app.monitoring.collector import MetricsCollector
 from app.storage.db import Storage
@@ -47,6 +50,7 @@ class BotManager:
         self.last_poll_ok: datetime | None = None
         self.last_poll_error: str | None = None
         self._conflict_stop: asyncio.Task | None = None
+        self._stop_lock = asyncio.Lock()
 
         if settings.TELEGRAM_BOT_TOKEN:
             self._init_bot()
@@ -62,6 +66,7 @@ class BotManager:
         )
         self.bot.session.middleware(self._track_poll)
         self.dp = Dispatcher()
+        self.dp.startup.register(self._register_commands)
 
         # Middlewares
         chat_auth = ChatAuthMiddleware(self.settings.command_chat_id)
@@ -79,17 +84,32 @@ class BotManager:
         self.dp.include_router(alerts.router)
         self.dp.include_router(admin.router)
 
+    async def _register_commands(self, bot: Bot) -> None:
+        chat_id = self.settings.command_chat_id
+        if chat_id >= 0:
+            return
+        try:
+            async with asyncio.timeout(5):
+                await bot.set_my_commands(
+                    [BotCommand(command=name, description=description) for name, description in COMMANDS],
+                    scope=BotCommandScopeChat(chat_id=chat_id),
+                )
+        except (TelegramAPIError, TimeoutError) as exc:
+            logger.warning("Telegram command menu setup failed: %s", type(exc).__name__)
+
     async def start_polling(self) -> None:
         """Starts Telegram bot polling in a resilient background task."""
         if not self.bot or not self.dp:
             logger.warning("Bot token not configured. Polling not started.")
             return
 
-        if self._is_running:
-            return
-
-        self._is_running = True
-        self._polling_task = asyncio.create_task(self._run_polling())
+        async with self._stop_lock:
+            if self._is_running:
+                return
+            self.last_poll_ok = None
+            self.last_poll_error = None
+            self._is_running = True
+            self._polling_task = asyncio.create_task(self._run_polling())
         logger.info("Bot polling task initiated on %s", self.settings.NODE_NAME)
 
     @property
@@ -106,7 +126,14 @@ class BotManager:
         if not isinstance(method, GetUpdates):
             return await make_request(bot, method)
         try:
-            result = await make_request(bot, method)
+            handover = self.ha_supervisor.handover
+            if handover is None:
+                result = await make_request(bot, method)
+            else:
+                if not handover.can_poll():
+                    raise RuntimeError("Telegram polling lease unavailable")
+                async with asyncio.timeout(REQUEST_SECONDS):
+                    result = await make_request(bot, method)
         except TelegramConflictError:
             logger.error("Telegram polling conflict; operator intervention required")
             self.last_poll_error = "TelegramConflictError"
@@ -122,20 +149,16 @@ class BotManager:
 
     async def stop_polling(self) -> None:
         """Gracefully stops Telegram bot polling."""
-        if not self._is_running:
-            return
-
-        self._is_running = False
-        if self._polling_task:
+        async with self._stop_lock:
+            if self._polling_task is None:
+                return
+            self._is_running = False
             if self.dp and not self._polling_task.done():
                 try:
                     await self.dp.stop_polling()
                 except RuntimeError:
                     self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
+            await asyncio.gather(self._polling_task, return_exceptions=True)
             self._polling_task = None
 
         logger.info("Bot polling stopped cleanly on %s", self.settings.NODE_NAME)
@@ -162,7 +185,7 @@ class BotManager:
                     **workflow_data,
                     handle_signals=False,
                     close_bot_session=False,
-                    polling_timeout=15,
+                    polling_timeout=5 if self.settings.HA_AUTO_FAILOVER else 15,
                 )
             except asyncio.CancelledError:
                 break
@@ -177,7 +200,10 @@ class BotManager:
         """Sends an operational alert to the designated Telegram chat."""
         if not self.bot or self.settings.TELEGRAM_CHAT_ID >= 0:
             raise RuntimeError("Telegram delivery is not configured")
-        await self.bot.send_message(chat_id=self.settings.TELEGRAM_CHAT_ID, text=message, parse_mode=None)
+        await self.bot.send_message(
+            chat_id=self.settings.TELEGRAM_CHAT_ID, text=message, parse_mode=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
 
     async def close(self) -> None:
         """Closes bot session."""

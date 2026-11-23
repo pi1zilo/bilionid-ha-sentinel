@@ -9,6 +9,7 @@ var body = {
     event_id: params.event_id,
     status: recovery ? "RECOVERY" : "PROBLEM",
     name: params.name,
+    host: params.host,
     severity: params.severity,
     detail: params.detail
 };

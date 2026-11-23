@@ -8,11 +8,12 @@ from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.filters.command import CommandObject
 
-from app.bot.formatters import format_incidents_view
+from app.bot.formatters import display_node, format_incidents_view
 from app.bot.keyboards.inline import back_to_menu_keyboard
 from app.monitoring.collector import MetricsCollector
 from app.storage.db import Storage
 from app.core.config import Settings
+from app.core.nodes import node_for_role
 
 router = Router(name="alerts_router")
 
@@ -22,9 +23,9 @@ async def alerts_view(storage: Storage, settings: Settings, collector: MetricsCo
         storage.get_recent_ha_events(limit=3), storage.get_recent_incidents(limit=10),
     )
     peer_incidents = await collector.get_peer_incidents() if settings.HA_PEER_ENABLED else []
-    text = format_incidents_view(events, incidents + (peer_incidents or []), settings.ALERT_TIMEZONE, settings.NODE_NAME)
+    text = format_incidents_view(events, incidents + (peer_incidents or []), settings)
     if peer_incidents is None:
-        text += f"\n\nЖурнал узла {settings.PEER_NODE_NAME} сейчас недоступен."
+        text += f"\n\nЖурнал {node_for_role(not settings.is_primary).label} недоступен."
     return text
 
 
@@ -41,12 +42,13 @@ async def cmd_note(message: types.Message, command: CommandObject, storage: Stor
         await message.answer("Пример: /note suslik Перезагрузил сервер вручную\nДо 300 символов в описании.")
         return
     host, detail = parts
+    host = display_node(settings, host)
     user = message.from_user
     author = f"@{user.username}" if user and user.username else user.full_name if user else "Участник чата"
     note_id = await storage.record_event(
         "Оператор", host, f"{author}: {detail}", message.date,
     )
-    await message.answer(f"📝 {host} · {settings.NODE_NAME} #{note_id}\n{author}: {detail}", parse_mode=None)
+    await message.answer(f"📝 {host} · {node_for_role(settings.is_primary).label} #{note_id}\n{author}: {detail}", parse_mode=None)
 
 
 @router.callback_query(lambda c: c.data == "nav_alerts")

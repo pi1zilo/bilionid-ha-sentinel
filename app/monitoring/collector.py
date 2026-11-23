@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 
 from app.core.config import Settings
+from app.core.nodes import BILI, SUSLIK, find_node
 from app.monitoring.beszel.client import BeszelClient
 from app.monitoring.docker.client import DockerMonitor
 from app.monitoring.models import ContainerInfo, ServerMetrics, UptimeKumaOverview
@@ -62,10 +63,17 @@ class MetricsCollector:
                 return self._cached_servers
 
             servers = await self.beszel.get_all_servers() if self.settings.BESZEL_ENABLED else []
+            if self.settings.BESZEL_ENABLED and not servers and not any(self.beszel.hub_available.values()):
+                servers = [self.local_metrics()]
+                if self.settings.HA_PEER_ENABLED:
+                    remote = await self.get_peer_metrics()
+                    if remote is not None:
+                        servers.append(remote)
             by_host = {(s.hostname or s.name).casefold(): s for s in servers}
+            fresh_names = {s.name.casefold() for s in servers}
             for previous in self._cached_servers:
                 key = (previous.hostname or previous.name).casefold()
-                if previous.source == "beszel" and key not in by_host:
+                if previous.source == "beszel" and key not in by_host and previous.name.casefold() not in fresh_names:
                     by_host[key] = previous.model_copy(update={
                         "status": "⚪ Нет свежих данных", "is_online": False,
                         "monitor_state": "UNKNOWN",
@@ -76,6 +84,29 @@ class MetricsCollector:
             self._cached_servers_time = now
             return servers
 
+    def local_metrics(self) -> ServerMetrics:
+        metrics = self.beszel.get_local_fallback_metrics(self.settings.NODE_NAME)
+        address = self.settings.TAILSCALE_IP
+        metrics.hostname = "" if address in {"127.0.0.1", "::1"} else address
+        if metrics.is_online:
+            metrics.status = "🟡 Локальные метрики · Beszel недоступен"
+            metrics.monitor_state = "FALLBACK"
+        return metrics
+
+    async def get_peer_metrics(self) -> ServerMetrics | None:
+        url = f"{self.settings.peer_ha_url}/ha/metrics"
+        headers = {"X-HA-Secret": self.settings.HA_SECRET_KEY}
+        try:
+            async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as session:
+                async with session.get(url, allow_redirects=False) as response:
+                    response.raise_for_status()
+                    metrics = ServerMetrics.model_validate(await response.json())
+            if metrics.name == self.settings.PEER_NODE_NAME:
+                return metrics
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            logger.debug("Peer metrics: %s", type(exc).__name__)
+        return None
+
     async def get_server_detail(self, query: str) -> Optional[ServerMetrics]:
         """Returns details for a specific server (e.g. 'bili', 'susl', 'main', 'backup')."""
         servers = await self.get_servers()
@@ -83,10 +114,11 @@ class MetricsCollector:
         local = (self.settings.NODE_NAME, self.settings.TAILSCALE_IP)
         peer = (self.settings.PEER_NODE_NAME, self.settings.PEER_TAILSCALE_IP)
         primary, standby = (local, peer) if self.settings.is_primary else (peer, local)
-        if query in {"bili", "main", "primary"}:
+        node = find_node(self.settings, query)
+        if node is BILI:
             name, address = primary
             aliases = ("bilionid",)
-        elif query in {"susl", "backup", "standby"}:
+        elif node is SUSLIK:
             name, address = standby
             aliases = ("suslikvpn", "suslik")
         else:

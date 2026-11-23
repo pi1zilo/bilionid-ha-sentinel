@@ -27,7 +27,7 @@ AVERAGE = re.compile(
     r"(?P<descriptor>.+) averaged (?P<value>-?\d+(?:\.\d+)?)(?P<unit>.*?) for the previous (?P<minutes>\d+) minutes?\.",
     re.IGNORECASE,
 )
-HOST_STATUS = re.compile(r"Connection to .+ is (?:up|down)(?: [✅🔴])?", re.IGNORECASE)
+HOST_STATUS = re.compile(r"Connection to (?P<host>.+) is (?P<state>up|down)(?: [✅🔴])?", re.IGNORECASE)
 SYSTEM_PATH = re.compile(r"(?:^|/)system/([a-zA-Z0-9]+)$")
 
 

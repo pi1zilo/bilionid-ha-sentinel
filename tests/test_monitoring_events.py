@@ -6,12 +6,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from aiogram.filters.command import CommandObject
 
 from app.bot.handlers.alerts import alerts_view, cmd_note
-from app.core.config import Settings
+from app.core.config import NodeRole, Settings
 from app.ha.http_server import HAHttpServer
 from app.ha.supervisor import HASupervisor
 from app.monitoring.collector import MetricsCollector
 from app.monitoring.events import Observation
-from app.monitoring.models import ServerMetrics
+from app.monitoring.models import ContainerInfo, ServerMetrics
 from app.services.monitoring import MonitoringService
 from app.storage.db import Storage
 
@@ -42,7 +42,8 @@ async def test_open_recover_and_retry_survive_process_restart(tmp_path):
     await storage.update_alert_delivery(first["id"])
     recovery = await storage.next_alert()
     assert "3 мин" in recovery["text"]
-    assert "При первом сигнале: HTTP 502" in recovery["text"]
+    assert "Было: HTTP 502" in recovery["text"]
+    assert "@" not in first["text"]
     await storage.update_alert_delivery(recovery["id"])
     assert await storage.delivery_counts() == {"pending": 0, "failed": 0}
 
@@ -118,14 +119,16 @@ async def test_beszel_webhook_translates_cpu_and_links_recovery(tmp_path):
     assert row["message"] == "Среднее за 1 мин — 96,43%. Выше порога."
     assert row["resolution"] == "Среднее за 1 мин — 28,25%. Ниже порога."
     opened = await storage.next_alert()
-    assert f"Beszel · main #{row['id']}" in opened["text"]
-    assert "suslik @suslik24na7 · загрузка CPU" in opened["text"]
+    assert f"Beszel · bili #{row['id']}" in opened["text"]
+    assert "suslik · загрузка CPU" in opened["text"]
+    assert opened["text"].count("@suslik24na7") == 1
     assert url in opened["text"]
     await storage.update_alert_delivery(opened["id"])
     recovered = await storage.next_alert()
-    assert f"Beszel · main #{row['id']}" in recovered["text"]
+    assert f"Beszel · bili #{row['id']}" in recovered["text"]
     assert "Вне порога" in recovered["text"]
     assert "96,43%" in recovered["text"] and "28,25%" in recovered["text"]
+    assert "@suslik24na7" not in recovered["text"]
     await storage.update_alert_delivery(recovered["id"])
     assert await storage.next_alert() is None
 
@@ -162,7 +165,8 @@ async def test_beszel_reboot_requires_consistent_fresh_uptime_and_persists(tmp_p
 
 
 async def test_journal_combines_operator_note_and_authenticated_peer_incident(tmp_path):
-    backup = Settings(DATA_DIR=tmp_path / "backup", NODE_NAME="backup", HA_PEER_ENABLED=True, HA_SECRET_KEY="secret")
+    backup = Settings(DATA_DIR=tmp_path / "backup", NODE_ROLE=NodeRole.STANDBY, NODE_NAME="backup",
+                      HA_PEER_ENABLED=True, HA_SECRET_KEY="secret")
     remote_storage = Storage(backup.db_path)
     await remote_storage.init_db()
     remote_collector = MetricsCollector(backup)
@@ -181,9 +185,52 @@ async def test_journal_combines_operator_note_and_authenticated_peer_incident(tm
         message.from_user.username = "operator"
         message.date = datetime.now(timezone.utc)
         await cmd_note(message, CommandObject(command="note", args="suslik Перезагрузил вручную"), storage, main)
-        assert "main #1" in message.answer.await_args.args[0]
+        assert "bili #1" in message.answer.await_args.args[0]
         text = await alerts_view(storage, main, MetricsCollector(main))
-        assert "Оператор · main #1" in text
+        assert "Оператор · bili #1" in text
         assert "@operator: Перезагрузил вручную" in text
-        assert "HA · backup #1" in text
-        assert text.index("Оператор") < text.index("HA · backup")
+        assert "HA · suslik #1" in text
+        assert text.index("Оператор") < text.index("HA · suslik")
+
+
+async def test_container_incident_closes_after_process_restart(tmp_path):
+    settings = Settings(DATA_DIR=tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.init_db()
+    collector = MetricsCollector(settings)
+    monitored = ContainerInfo(name="web", server="main", state="running")
+    stopped = ContainerInfo(name="unused", server="main", state="exited")
+    collector.get_all_containers = AsyncMock(return_value={"main": [monitored, stopped]})
+    monitoring = MonitoringService(settings, storage, collector)
+    await monitoring._check_containers()
+    monitored.state = "exited"
+    monitored.status = "Exited (137) 10 seconds ago"
+    await monitoring._check_containers()
+    incident, = await storage.get_active_incidents()
+    assert incident["server"] == "bili · контейнер web"
+    alert = await storage.next_alert()
+    assert "Код выхода 137" in alert["text"]
+    assert "@bilionid" in alert["text"]
+
+    monitoring = MonitoringService(settings, Storage(settings.db_path), collector)
+    collector.get_all_containers.return_value = {"main": []}
+    await monitoring._check_containers()
+    assert len(await storage.get_active_incidents()) == 1
+    monitored.state = "running"
+    collector.get_all_containers.return_value = {"main": [monitored, stopped]}
+    await monitoring._check_containers()
+    assert not await storage.get_active_incidents()
+
+
+async def test_sentinel_resource_limits_use_incident_queue(tmp_path):
+    settings = Settings(DATA_DIR=tmp_path)
+    storage = Storage(settings.db_path)
+    await storage.init_db()
+    monitoring = MonitoringService(settings, storage, MetricsCollector(settings))
+    server = ServerMetrics(name="main", cpu_percent=96, ram_percent=70, disk_percent=91)
+    await monitoring._check_resource_limits(server, "main")
+    warning, = await storage.get_active_incidents()
+    assert warning["server"] == "bili · загрузка CPU"
+    server.cpu_percent = 80
+    await monitoring._check_resource_limits(server, "main")
+    assert not await storage.get_active_incidents()

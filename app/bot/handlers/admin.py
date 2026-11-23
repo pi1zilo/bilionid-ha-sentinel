@@ -9,11 +9,13 @@ from aiogram.filters.command import CommandObject
 from app.bot.formatters import format_admin_view, format_infrastructure_status
 from app.bot.keyboards.inline import back_to_menu_keyboard, server_logs_keyboard, servers_keyboard
 from app.core.config import Settings
+from app.core.nodes import BILI, find_node, node_for_role
 from app.ha.supervisor import HASupervisor
 from app.monitoring.collector import MetricsCollector
 from app.monitoring.server_logs import DEFAULT_LOG_LINES, MAX_LOG_LINES, JournalUnavailable, parse_log_lines
 
 router = Router(name="admin_router")
+LOG_PROMPT = f"Журнал какого сервера открыть? Покажу последние {DEFAULT_LOG_LINES} строк."
 
 
 @router.message(Command("logs"))
@@ -22,28 +24,26 @@ async def cmd_logs(
 ) -> None:
     args = (command.args or "").split()
     if not args:
-        await message.answer(
-            f"Выберите сервер, чтобы посмотреть последние {DEFAULT_LOG_LINES} строк журнала.",
-            reply_markup=server_logs_keyboard(), parse_mode=None,
-        )
+        await message.answer(LOG_PROMPT, reply_markup=server_logs_keyboard(), parse_mode=None)
         return
 
-    targets = {
-        settings.PEER_NODE_NAME.casefold(): True,
-        settings.NODE_NAME.casefold(): False,
-        "main": not settings.is_primary,
-        "backup": settings.is_primary,
-        "local": False,
-    }
     try:
-        if len(args) > 2:
+        node = node_for_role(settings.is_primary) if args[0].casefold() == "local" else find_node(settings, args[0])
+        if len(args) > 2 or node is None:
             raise ValueError
-        peer = targets[args[0].casefold()]
         lines = parse_log_lines(args[1]) if len(args) == 2 else DEFAULT_LOG_LINES
-    except (KeyError, ValueError):
-        await message.answer(f"Пример — /logs backup 100. Укажите от 1 до {MAX_LOG_LINES} строк.", parse_mode=None)
+    except ValueError:
+        await message.answer(f"/logs suslik 100 · от 1 до {MAX_LOG_LINES} строк", parse_mode=None)
         return
+    peer = (node is BILI) != settings.is_primary
     await _send_server_logs(message, settings, collector, peer=peer, lines=lines)
+
+
+@router.callback_query(F.data == "nav_logs")
+async def cb_logs_menu(callback: types.CallbackQuery) -> None:
+    await callback.answer()
+    if isinstance(callback.message, types.Message):
+        await callback.message.edit_text(LOG_PROMPT, reply_markup=server_logs_keyboard(), parse_mode=None)
 
 
 @router.callback_query(F.data.in_({"server_logs:main", "server_logs:backup"}))
@@ -59,11 +59,12 @@ async def cb_server_logs(callback: types.CallbackQuery, settings: Settings, coll
 async def _send_server_logs(
     message: types.Message, settings: Settings, collector: MetricsCollector, *, peer: bool, lines: int,
 ) -> None:
-    node = settings.PEER_NODE_NAME if peer else settings.NODE_NAME
+    node = node_for_role(settings.is_primary != peer).label
     try:
         journal = await collector.get_server_logs(peer, lines)
     except JournalUnavailable:
-        await message.answer(f"Системный журнал {node} недоступен. Проверьте настройки и связь с узлом.", parse_mode=None)
+        hint = f"Проверьте journald на {node}." if not peer else f"Проверьте /ha и journald на {node}."
+        await message.answer(f"Журнал {node} недоступен. {hint}", parse_mode=None)
         return
 
     title = f"Системный журнал {node} · UTC · сначала новые записи"

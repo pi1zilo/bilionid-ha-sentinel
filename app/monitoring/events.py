@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from app.core.nodes import Node
+
 
 @dataclass(frozen=True)
 class Observation:
@@ -17,3 +19,4 @@ class Observation:
     severity: str = "WARNING"
     duration_label: str = "Длительность сбоя"
     link: str = ""
+    node: Node | None = None

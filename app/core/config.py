@@ -61,6 +61,8 @@ class Settings(BaseSettings):
         description="Pre-shared authentication key for inter-node communication"
     )
     HA_PEER_ENABLED: bool = False
+    HA_AUTO_FAILOVER: bool = False
+    HA_ADMIN_USER_ID: int = Field(default=0, ge=0)
     HA_PEER_PORT: int | None = Field(default=None, ge=1, le=65535)
     HA_WATCH_PRIMARY: bool = False
     HA_HEARTBEAT_INTERVAL_SEC: float = Field(
@@ -240,7 +242,9 @@ class Settings(BaseSettings):
             raise ValueError("HA_SECRET_KEY must be a unique secret of at least 32 characters")
         if self.HA_WATCH_PRIMARY and (not self.HA_PEER_ENABLED or not self.is_standby):
             raise ValueError("HA_WATCH_PRIMARY requires a STANDBY with HA_PEER_ENABLED")
-        if self.polling_enabled or self.HA_WATCH_PRIMARY:
+        if self.HA_AUTO_FAILOVER and not self.HA_PEER_ENABLED:
+            raise ValueError("HA_AUTO_FAILOVER requires HA_PEER_ENABLED on both nodes")
+        if self.polling_enabled or self.HA_WATCH_PRIMARY or self.HA_AUTO_FAILOVER:
             if not self.TELEGRAM_BOT_TOKEN or not self.TELEGRAM_CHAT_ID:
                 raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
         for secret in (self.BESZEL_WEBHOOK_SECRET, self.UPTIME_KUMA_WEBHOOK_SECRET, self.ZABBIX_WEBHOOK_SECRET):

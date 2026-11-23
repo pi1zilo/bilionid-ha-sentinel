@@ -2,6 +2,7 @@
 
 import logging
 from hmac import compare_digest
+from string import hexdigits
 
 from aiohttp import web
 
@@ -35,13 +36,18 @@ class HAHttpServer:
             self.app.router.add_get("/ha/status", self.peer_status)
             self.app.router.add_get("/ha/containers", self.peer_containers)
             self.app.router.add_get("/ha/incidents", self.peer_incidents)
+            self.app.router.add_get("/ha/metrics", self.peer_metrics)
+            if settings.HA_AUTO_FAILOVER and settings.is_standby:
+                self.app.router.add_post("/ha/grant", self.peer_grant)
+                self.app.router.add_post("/ha/preference", self.peer_preference)
             if settings.SERVER_LOGS_ENABLED:
                 self.app.router.add_get("/ha/logs", self.peer_logs)
-        if settings.polling_enabled and settings.BESZEL_WEBHOOK_SECRET:
+        webhook_receiver = settings.is_standby if settings.HA_AUTO_FAILOVER else settings.polling_enabled
+        if webhook_receiver and settings.BESZEL_WEBHOOK_SECRET:
             self.app.router.add_post("/events/beszel", self.beszel_event)
-        if settings.polling_enabled and settings.UPTIME_KUMA_WEBHOOK_SECRET:
+        if webhook_receiver and settings.UPTIME_KUMA_WEBHOOK_SECRET:
             self.app.router.add_post("/events/kuma", self.kuma_event)
-        if settings.polling_enabled and settings.ZABBIX_WEBHOOK_SECRET:
+        if webhook_receiver and settings.ZABBIX_WEBHOOK_SECRET:
             self.app.router.add_post("/events/zabbix", self.zabbix_event)
         self.runner = web.AppRunner(self.app, access_log=None)
 
@@ -69,10 +75,42 @@ class HAHttpServer:
         containers = await self.docker_monitor.get_containers()
         return web.json_response({"containers": [item.model_dump() for item in containers]})
 
+    async def peer_metrics(self, request: web.Request) -> web.Response:
+        self._authorize_peer(request)
+        return web.json_response(self.monitoring.collector.local_metrics().model_dump())
+
     async def peer_incidents(self, request: web.Request) -> web.Response:
         self._authorize_peer(request)
         incidents = await self.monitoring.storage.get_recent_incidents(limit=10)
         return web.json_response({"node": self.settings.NODE_NAME, "incidents": incidents})
+
+    async def _handover_request(self, request: web.Request) -> dict:
+        self._authorize_peer(request)
+        try:
+            document = await request.json()
+        except (ValueError, TypeError):
+            raise web.HTTPBadRequest() from None
+        if not isinstance(document, dict) or document.get("node") != self.settings.PEER_NODE_NAME:
+            raise web.HTTPBadRequest()
+        if self.supervisor.handover is None:
+            raise web.HTTPServiceUnavailable()
+        return document
+
+    async def peer_grant(self, request: web.Request) -> web.Response:
+        document = await self._handover_request(request)
+        session = document.get("session")
+        if not isinstance(session, str) or len(session) != 32 or any(c not in hexdigits for c in session):
+            raise web.HTTPBadRequest()
+        granted = await self.supervisor.handover.grant(session)
+        return web.json_response({"node": self.settings.NODE_NAME, "granted": granted})
+
+    async def peer_preference(self, request: web.Request) -> web.Response:
+        document = await self._handover_request(request)
+        target = document.get("target")
+        if target not in ("main", "backup"):
+            raise web.HTTPBadRequest()
+        await self.supervisor.handover.prefer(target)
+        return web.json_response({"node": self.settings.NODE_NAME, "target": target})
 
     async def peer_logs(self, request: web.Request) -> web.Response:
         self._authorize_peer(request)

@@ -4,7 +4,7 @@ import sys
 from unittest.mock import AsyncMock
 
 from aiohttp.test_utils import TestClient, TestServer
-from aiogram.methods import AnswerCallbackQuery, SendDocument, SendMessage
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendDocument, SendMessage, SetMyCommands
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 import pytest
 
@@ -96,6 +96,13 @@ async def test_logs_commands_and_buttons_work_for_everyone_in_the_command_group(
         )
 
     try:
+        await manager.dp.emit_startup(bot=manager.bot)
+        registered = requests.await_args.args[1]
+        assert isinstance(registered, SetMyCommands)
+        assert registered.scope.chat_id == group
+        assert {"logs", "alerts", "note", "handover", "problems"} <= {command.command for command in registered.commands}
+        requests.reset_mock()
+
         await send("/logs backup 100", 456, settings.TELEGRAM_CHAT_ID, "supergroup")
         await send("/logs backup 100", 456, 456, "private")
         await send("/start", 123, 123, "private")
@@ -103,6 +110,15 @@ async def test_logs_commands_and_buttons_work_for_everyone_in_the_command_group(
         requests.assert_not_awaited()
         await send("/help", 456, group, "supergroup")
         assert "Доступные команды" in requests.await_args.args[1].text
+
+        await send("/start", 456, group, "supergroup")
+        menu = requests.await_args.args[1]
+        logs_button, = [button for row in menu.reply_markup.inline_keyboard for button in row if button.callback_data == "nav_logs"]
+        await click(logs_button.callback_data, 456, group, "supergroup")
+        selector = requests.await_args.args[1]
+        assert isinstance(selector, EditMessageText)
+        assert [button.text for button in selector.reply_markup.inline_keyboard[0]] == ["bili", "suslik"]
+        collector.get_server_logs.assert_not_awaited()
 
         await send("/logs main 201", 123, group, "supergroup")
         collector.get_server_logs.assert_not_awaited()
@@ -113,7 +129,7 @@ async def test_logs_commands_and_buttons_work_for_everyone_in_the_command_group(
         menu = requests.await_args.args[1]
         assert menu.chat_id == group
         main, backup = menu.reply_markup.inline_keyboard[0]
-        assert [main.text, backup.text] == ["Main", "Backup"]
+        assert [main.text, backup.text] == ["bili", "suslik"]
         assert "50" in menu.text
 
         requests.reset_mock()
@@ -125,25 +141,25 @@ async def test_logs_commands_and_buttons_work_for_everyone_in_the_command_group(
         await click(main.callback_data, 456, group, "supergroup")
         collector.get_server_logs.assert_awaited_once_with(False, 50)
         assert isinstance(requests.await_args_list[0].args[1], AnswerCallbackQuery)
-        assert "main" in requests.await_args.args[1].text
+        assert "Журнал bili".lower() in requests.await_args.args[1].text.lower()
 
         await click(backup.callback_data, 123, group, "supergroup")
         collector.get_server_logs.assert_awaited_with(True, 50)
-        assert "backup" in requests.await_args.args[1].text
+        assert "журнал suslik" in requests.await_args.args[1].text
 
         standby = settings.model_copy(update={"NODE_ROLE": NodeRole.STANDBY, "NODE_NAME": "backup", "PEER_NODE_NAME": "main"})
         await click(main.callback_data, 123, group, "supergroup", standby)
         collector.get_server_logs.assert_awaited_with(True, 50)
-        assert "main" in requests.await_args.args[1].text
+        assert "журнал bili" in requests.await_args.args[1].text
 
         collector.get_server_logs.reset_mock()
-        await send("/logs backup 100", 456, group, "supergroup")
+        await send("/logs suslik 100", 456, group, "supergroup")
         collector.get_server_logs.assert_awaited_once_with(True, 100)
         result = requests.await_args.args[1]
         assert isinstance(result, SendMessage) and result.protect_content
         assert result.chat_id == group
         assert result.link_preview_options.is_disabled
-        assert "backup" in result.text and "Started service" in result.text
+        assert "suslik" in result.text and "Started service" in result.text
 
         collector.get_server_logs.return_value = "long journal " * 500
         await click(main.callback_data, 123, group, "supergroup")

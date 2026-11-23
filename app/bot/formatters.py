@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from app.core.config import Settings
+from app.core.nodes import BILI, SUSLIK, find_node, node_for_role
 from app.ha.supervisor import HASupervisor
 from app.monitoring.models import ContainerInfo, ServerMetrics, UptimeKumaOverview
 from app.services.monitoring import parse_event_time
@@ -16,8 +18,13 @@ def format_time(value: str | None, tz_name: str = "Europe/Moscow") -> str:
     return parsed.astimezone(ZoneInfo(tz_name)).strftime("%d.%m %H:%M:%S %Z") if parsed else "—"
 
 
-def format_server_card(server: ServerMetrics, tz_name: str = "Europe/Moscow") -> str:
-    lines = [f"🖥 {server.name}", f"Статус: {server.status}", f"Источник: {server.source}"]
+def display_node(settings: Settings, name: str, host: str = "") -> str:
+    node = find_node(settings, host, name)
+    return node.label if node else name
+
+
+def format_server_card(server: ServerMetrics, settings: Settings) -> str:
+    lines = [f"🖥 {display_node(settings, server.name, server.hostname)} · {server.status}", f"Источник: {server.source}"]
     if server.monitor_state not in {"DOWN", "UNKNOWN"}:
         lines += [f"CPU: {server.cpu_percent}%", f"RAM: {server.ram_percent}%", f"Диск: {server.disk_percent}%"]
         if server.ram_total_gb:
@@ -28,7 +35,7 @@ def format_server_card(server: ServerMetrics, tz_name: str = "Europe/Moscow") ->
             lines.append(f"Температура: {server.temperature} °C")
         lines.append(f"Uptime: {server.uptime_str}")
     if server.last_updated:
-        lines.append(f"Последние данные: {format_time(server.last_updated, tz_name)}")
+        lines.append(f"Последние данные: {format_time(server.last_updated, settings.ALERT_TIMEZONE)}")
     return "\n".join(lines)
 
 
@@ -37,11 +44,13 @@ def format_infrastructure_status(
     delivery: dict | None = None,
 ) -> str:
     info = supervisor.get_ha_info()
-    lines = ["🌐 Инфраструктура", f"Узел: {info['node_name']} · {info['state']}", "", "🖥 Серверы"]
+    settings = supervisor.settings
+    local = node_for_role(settings.is_primary).label
+    lines = [f"🌐 Инфраструктура · {local}", "", "🖥 Серверы"]
     if not servers:
         lines.append("Нет данных Beszel.")
     for server in servers:
-        lines.append(f"• {server.name}: {server.status}")
+        lines.append(f"• {display_node(settings, server.name, server.hostname)} — {server.status}")
     lines += ["", "⏱ Uptime Kuma"]
     if kuma.available:
         lines.append(f"Всего {kuma.total_count} · UP {kuma.up_count} · DOWN {kuma.down_count}")
@@ -54,10 +63,13 @@ def format_infrastructure_status(
 
 def format_ha_status(supervisor: HASupervisor) -> str:
     info = supervisor.get_ha_info()
-    tz = supervisor.settings.ALERT_TIMEZONE
+    settings = supervisor.settings
+    local = node_for_role(settings.is_primary).label
+    peer = node_for_role(not settings.is_primary).label
+    tz = settings.ALERT_TIMEZONE
     lines = [
         "🔄 Состояние HA",
-        f"Узел: {info['node_name']} · {info['role']} · {info['state']}",
+        f"Узел: {local}",
         f"Telegram polling: {'активен' if info['polling_ready'] else 'не готов' if info['polling_enabled'] else 'выключен'}",
         f"Последний getUpdates: {format_time(info.get('last_poll_ok'), tz)}",
     ]
@@ -66,18 +78,21 @@ def format_ha_status(supervisor: HASupervisor) -> str:
     if info["peer_configured"]:
         lines += [
             "",
-            f"Резервный адрес: {info['peer_name']} · {supervisor.peer_health.peer_ip}",
+            f"Второй узел: {peer} · {supervisor.peer_health.peer_ip}",
             f"HA API: {'доступен' if info['peer_reachable'] else 'нет связи'}",
             f"Polling второго узла: { {True: 'активен', False: 'выключен или недоступен', None: 'неизвестно'}[info['peer_polling_ready']] }",
         ]
-    lines += ["", "Переключение выполняется через SSH."]
+    if supervisor.settings.HA_AUTO_FAILOVER:
+        lines += ["", f"Автопереключение. {SUSLIK.label} выдаёт {BILI.label} разрешение на polling."]
+    else:
+        lines += ["", "Переключение выполняется через SSH."]
     return "\n".join(lines)
 
 
-def format_containers_view(containers_by_server: dict[str, list[ContainerInfo]]) -> str:
+def format_containers_view(containers_by_server: dict[str, list[ContainerInfo]], settings: Settings) -> str:
     lines = ["🐳 Контейнеры"]
     for server, containers in containers_by_server.items():
-        lines += ["", server]
+        lines += ["", display_node(settings, server)]
         if not containers:
             lines.append("Нет данных Docker.")
         for container in containers:
@@ -88,10 +103,10 @@ def format_containers_view(containers_by_server: dict[str, list[ContainerInfo]])
 
 def format_beszel_view(status: dict) -> str:
     lines = ["📊 Beszel", f"Основной источник данных: {status.get('active_hub', '—')}"]
-    for key, label in (("main", "Main"), ("backup", "Backup")):
+    for key, node in (("main", BILI), ("backup", SUSLIK)):
         hub = status.get(key, {})
         if hub.get("url"):
-            lines.append(f"• {label}: {'доступен' if hub.get('available') else 'нет связи'}")
+            lines.append(f"• {node.label} — {'доступен' if hub.get('available') else 'нет связи'}")
     return "\n".join(lines)
 
 
@@ -106,8 +121,9 @@ def format_uptime_kuma_view(overview: UptimeKumaOverview) -> str:
 
 
 def format_incidents_view(
-    ha_events: list[dict], incidents: list[dict], tz_name: str = "Europe/Moscow", node_name: str = "",
+    ha_events: list[dict], incidents: list[dict], settings: Settings,
 ) -> str:
+    tz_name = settings.ALERT_TIMEZONE
     lines = ["🚨 Журнал инцидентов"]
     if not ha_events and not incidents:
         return f"{lines[0]}\nЗаписей пока нет."
@@ -115,11 +131,11 @@ def format_incidents_view(
     for incident in incidents:
         timestamp = format_time(incident["timestamp"], tz_name)
         closed = incident.get("resolved_at")
-        origin = incident.get("node") or node_name
+        origin = display_node(settings, incident.get("node") or settings.NODE_NAME)
         reference = f" · {origin} #{incident['id']}" if origin else ""
         standalone = closed == incident["timestamp"] and incident.get("severity") == "INFO"
         state = "ℹ️" if standalone else "🟢" if closed else "🔴"
-        entry = f"{state} {incident['server']}\n{incident['category']}{reference} · {timestamp}"
+        entry = f"{state} {display_node(settings, incident['server'])}\n{incident['category']}{reference} · {timestamp}"
         if incident["message"]:
             entry += f"\n{incident['message'][:200]}"
         if closed and not standalone:
@@ -133,7 +149,7 @@ def format_incidents_view(
             "STANDBY_STARTUP": "Запуск резервного узла",
         }.get(event["event_type"], event["event_type"])
         entries.append((event["timestamp"],
-            f"• {event['source_node']} · {label}\n{format_time(event['timestamp'], tz_name)}"))
+            f"• {display_node(settings, event['source_node'])} · {label}\n{format_time(event['timestamp'], tz_name)}"))
     for _, entry in sorted(entries, reverse=True):
         if sum(len(line) + 1 for line in lines) + len(entry) + 2 > 3800:
             break

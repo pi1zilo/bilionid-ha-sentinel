@@ -4,9 +4,11 @@ Inline keyboard builders for BilioniD HA Bot.
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.core.nodes import BILI, SUSLIK
+
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Builds the primary navigation menu with 6 main sections."""
+    """Builds the main monitoring menu."""
     keyboard = [
         [
             InlineKeyboardButton(text="🖥 Серверы", callback_data="nav_servers"),
@@ -21,7 +23,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⚙️ Управление", callback_data="nav_admin"),
         ],
         [
-            InlineKeyboardButton(text="🔄 Обновить все", callback_data="nav_refresh"),
+            InlineKeyboardButton(text="📄 Логи", callback_data="nav_logs"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="nav_refresh"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -31,8 +34,8 @@ def servers_keyboard() -> InlineKeyboardMarkup:
     """Builds keyboard for viewing specific server details."""
     keyboard = [
         [
-            InlineKeyboardButton(text="🖥 Main", callback_data="server_detail:bili"),
-            InlineKeyboardButton(text="🖥 Backup", callback_data="server_detail:susl"),
+            InlineKeyboardButton(text=f"🖥 {BILI.label}", callback_data="server_detail:bili"),
+            InlineKeyboardButton(text=f"🖥 {SUSLIK.label}", callback_data="server_detail:suslik"),
         ],
         [
             InlineKeyboardButton(text="🔄 Обновить", callback_data="nav_servers"),
@@ -43,19 +46,19 @@ def servers_keyboard() -> InlineKeyboardMarkup:
 
 
 def server_logs_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Main", callback_data="server_logs:main"),
-        InlineKeyboardButton(text="Backup", callback_data="server_logs:backup"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=BILI.label, callback_data="server_logs:main"),
+         InlineKeyboardButton(text=SUSLIK.label, callback_data="server_logs:backup")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="nav_main_menu")],
+    ])
 
 
 def server_detail_keyboard(server_key: str) -> InlineKeyboardMarkup:
     """Keyboard for single server view."""
-    other_key = "susl" if server_key == "bili" else "bili"
-    other_name = "Backup" if server_key == "bili" else "Main"
+    other = SUSLIK if server_key in BILI.aliases else BILI
     keyboard = [
         [
-            InlineKeyboardButton(text=f"Перейти к {other_name}", callback_data=f"server_detail:{other_key}"),
+            InlineKeyboardButton(text=f"Перейти к {other.label}", callback_data=f"server_detail:{other.label}"),
         ],
         [
             InlineKeyboardButton(text="🔄 Обновить", callback_data=f"server_detail:{server_key}"),

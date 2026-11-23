@@ -59,9 +59,9 @@ async def cmd_server_detail(
         )
         return
 
-    text = format_server_card(server, settings.ALERT_TIMEZONE)
+    text = format_server_card(server, settings)
     primary = await collector.get_server_detail("main")
-    key = "bili" if server == primary else "susl"
+    key = "bili" if server == primary else "suslik"
     await message.answer(text, reply_markup=server_detail_keyboard(key), parse_mode=None)
 
 
@@ -94,7 +94,7 @@ async def cb_server_detail(
         await callback.answer("Данные сервера временно недоступны", show_alert=True)
         return
 
-    text = format_server_card(server, settings.ALERT_TIMEZONE)
+    text = format_server_card(server, settings)
     if callback.message:
         await callback.message.edit_text(
             text, reply_markup=server_detail_keyboard(server_key), parse_mode=None

@@ -12,6 +12,7 @@ from app.bot.bot import BotManager
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.ha.supervisor import HASupervisor
+from app.ha.handover import TwoNodeHandover
 from app.ha.http_server import HAHttpServer
 from app.monitoring.collector import MetricsCollector
 from app.monitoring.docker.client import DockerMonitor
@@ -77,13 +78,36 @@ async def run_app() -> None:
         }
 
     async def send_queued_alert(message: str) -> None:
-        if settings.polling_enabled and bot_manager.last_poll_error == "TelegramConflictError":
+        if supervisor.polling_enabled and bot_manager.last_poll_error == "TelegramConflictError":
             raise RuntimeError("Operator must resolve the Telegram polling conflict")
         await bot_manager.send_alert_message(message)
 
     supervisor.bot_status = bot_status
     tasks = []
+    checks = []
     stop_event = asyncio.Event()
+
+    async def switch_polling(active: bool) -> None:
+        if active:
+            await bot_manager.start_polling()
+            checks.extend(monitoring.start_checks())
+        else:
+            await bot_manager.stop_polling()
+            for task in checks:
+                task.cancel()
+            await asyncio.gather(*checks, return_exceptions=True)
+            checks.clear()
+        supervisor.polling_enabled = active
+        try:
+            if settings.HA_AUTO_FAILOVER:
+                await monitoring.report_handover(active)
+            else:
+                await storage.record_ha_event("POLLING_ENABLED", settings.NODE_NAME)
+        except Exception:
+            logger.exception("Could not record polling handover")
+
+    if settings.HA_AUTO_FAILOVER:
+        supervisor.handover = TwoNodeHandover(settings, switch_polling)
 
     def request_shutdown(sig_name: str) -> None:
         logger.info("Received termination signal %s. Initiating graceful shutdown...", sig_name)
@@ -95,23 +119,23 @@ async def run_app() -> None:
             loop.add_signal_handler(s, lambda s=s: request_shutdown(s.name))
     try:
         await http_server.start()
-        await storage.record_ha_event(
-            "POLLING_ENABLED" if settings.polling_enabled else "STANDBY_STARTUP",
-            settings.NODE_NAME,
-        )
-        if settings.polling_enabled:
-            await bot_manager.start_polling()
-            tasks.extend(monitoring.start_checks())
+        if supervisor.handover is not None:
+            tasks.append(asyncio.create_task(supervisor.handover.run()))
+            tasks.extend(monitoring.start_webhook_checks())
+        elif settings.polling_enabled:
+            await switch_polling(True)
+        else:
+            await storage.record_ha_event("STANDBY_STARTUP", settings.NODE_NAME)
         if settings.HA_PEER_ENABLED:
             tasks.append(asyncio.create_task(supervisor.run()))
-        if settings.polling_enabled or settings.HA_WATCH_PRIMARY:
+        if settings.polling_enabled or settings.HA_WATCH_PRIMARY or settings.HA_AUTO_FAILOVER:
             tasks.append(asyncio.create_task(monitoring.deliver(send_queued_alert)))
         await stop_event.wait()
     finally:
         logger.info("Shutting down BilioniD HA Bot components...")
-        for task in tasks:
+        for task in tasks + checks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, *checks, return_exceptions=True)
         await http_server.stop()
         await bot_manager.close()
         logger.info("Shutdown complete.")

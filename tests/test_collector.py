@@ -32,3 +32,13 @@ async def test_server_button_prefers_configured_address_over_legacy_name():
     collector.get_servers = AsyncMock(return_value=[other, main])
 
     assert await collector.get_server_detail("main") == main
+
+
+async def test_local_and_peer_metrics_are_available_when_both_hubs_fail():
+    collector = MetricsCollector(Settings(NODE_NAME="main", PEER_NODE_NAME="backup", HA_PEER_ENABLED=True))
+    collector.beszel.get_all_servers = AsyncMock(return_value=[])
+    remote = ServerMetrics(name="backup", source="local_fallback", monitor_state="FALLBACK")
+    collector.get_peer_metrics = AsyncMock(return_value=remote)
+    local, peer = await collector.get_servers()
+    assert local.source == "local_fallback" and local.monitor_state == "FALLBACK"
+    assert peer == remote

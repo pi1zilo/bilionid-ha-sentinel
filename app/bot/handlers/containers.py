@@ -15,14 +15,14 @@ router = Router(name="containers_router")
 @router.message(Command("containers"))
 async def cmd_containers(message: types.Message, collector: MetricsCollector) -> None:
     containers = await collector.get_all_containers()
-    text = format_containers_view(containers)
+    text = format_containers_view(containers, collector.settings)
     await message.answer(text, reply_markup=back_to_menu_keyboard("nav_containers"), parse_mode=None)
 
 
 @router.callback_query(lambda c: c.data == "nav_containers")
 async def cb_containers(callback: types.CallbackQuery, collector: MetricsCollector) -> None:
     containers = await collector.get_all_containers()
-    text = format_containers_view(containers)
+    text = format_containers_view(containers, collector.settings)
     if callback.message:
         await callback.message.edit_text(
             text, reply_markup=back_to_menu_keyboard("nav_containers"), parse_mode=None
