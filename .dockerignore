@@ -1,4 +1,5 @@
 .git
+.deploy.lock
 .env*
 data
 *.tar.gz

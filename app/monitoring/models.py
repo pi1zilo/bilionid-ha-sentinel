@@ -58,6 +58,7 @@ class UptimeKumaMonitor(BaseModel):
     uptime_24h: Optional[float] = Field(default=None)
     last_check: Optional[str] = Field(default=None)
     msg: Optional[str] = Field(default=None)
+    tags: list[str] = Field(default_factory=list)
 
 
 class UptimeKumaOverview(BaseModel):

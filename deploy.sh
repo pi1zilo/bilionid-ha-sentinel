@@ -12,8 +12,21 @@ usage() {
         'bash deploy.sh --enable-docker-monitoring  Enable local container monitoring and start' \
         'bash deploy.sh --status            Show container status and readiness' \
         'bash deploy.sh --logs              Follow service logs' \
-        'bash deploy.sh --backup-config     Back up .env and a consistent SQLite snapshot'
+        'bash deploy.sh --backup-config     Back up .env and a consistent SQLite snapshot' \
+        'bash deploy.sh --update            Deploy new commits from origin on the current branch' \
+        'bash deploy.sh --install-update-timer [HH:MM]  Schedule daily updates (Moscow time)'
 }
+
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+case "${1:-}" in
+    ''|--init|--setup|--enable-docker-monitoring|--update)
+        exec {deploy_lock}>>.deploy.lock
+        flock -n "$deploy_lock" || fail 'Another deployment is already running.' ;;
+esac
 
 case "${1:-}" in
     --help|-h) usage; exit 0 ;;
@@ -31,7 +44,7 @@ case "${1:-}" in
         if [[ ! -f .env && -t 0 ]]; then
             bash scripts/setup-env.sh
         fi ;;
-    --check|--status|--logs|--backup-config|--enable-docker-monitoring) ;;
+    --check|--status|--logs|--backup-config|--enable-docker-monitoring|--update|--install-update-timer) ;;
     *) usage >&2; exit 2 ;;
 esac
 
@@ -42,7 +55,48 @@ fi
 
 compose=(docker compose --env-file .env)
 
+prepare_data_owner() {
+    if [[ ! -d data ]]; then
+        if (( EUID == 0 )); then
+            install -d -m 0700 -o 1000 -g 1000 data
+        else
+            install -d -m 0700 data
+        fi
+    fi
+    local actual_uid actual_gid
+    actual_uid=$(stat -c '%u' data) || return
+    actual_gid=$(stat -c '%g' data) || return
+    if [[ "$actual_uid" == 0 ]]; then
+        printf '%s/data is owned by root. Set its owner to the non-root UID that should run the bot.\n' "$PWD" >&2
+        return 1
+    fi
+    export APP_UID="$actual_uid" APP_GID="$actual_gid"
+}
+
+start_bot() {
+    "${compose[@]}" up -d --wait --wait-timeout 60 "$@" || return
+    local attempt
+    for attempt in {1..30}; do
+        if "${compose[@]}" exec -T bot python -m app.core.healthcheck /ready; then
+            printf 'Bot is ready.\n'
+            return 0
+        fi
+        sleep 2
+    done
+    printf 'Bot is running but not ready. Use bash deploy.sh --logs.\n' >&2
+    return 1
+}
+
 case "${1:-}" in
+    --update)
+        source scripts/auto-update.sh
+        run_update
+        exit ;;
+    --install-update-timer)
+        (( $# <= 2 )) || fail 'Usage: bash deploy.sh --install-update-timer [HH:MM]'
+        source scripts/auto-update.sh
+        install_update_timer "${2:-04:00}"
+        exit ;;
     --status)
         "${compose[@]}" ps
         "${compose[@]}" exec -T bot python -m app.core.healthcheck /ready
@@ -93,27 +147,10 @@ if [[ "${1:-}" == --check ]]; then
 fi
 
 chmod 0600 .env
-if [[ ! -d data ]]; then
-    if (( EUID == 0 )); then
-        install -d -m 0700 -o 1000 -g 1000 data
-    else
-        install -d -m 0700 data
-    fi
-fi
-actual_uid=$(stat -c '%u' data)
-actual_gid=$(stat -c '%g' data)
-if [[ "$actual_uid" == 0 ]]; then
-    printf '%s/data is owned by root. Set its owner to the non-root UID that should run the bot.\n' "$PWD" >&2
-    exit 1
-fi
-export APP_UID="$actual_uid" APP_GID="$actual_gid"
-
-"${compose[@]}" up -d --build --wait --wait-timeout 60
-for attempt in {1..30}; do
-    if "${compose[@]}" exec -T bot python -m app.core.healthcheck /ready; then
-        printf 'Bot is ready.\n'
-        if [[ "${1:-}" == --enable-docker-monitoring ]]; then
-            "${compose[@]}" exec -T bot python - <<'PY'
+prepare_data_owner
+start_bot --build
+if [[ "${1:-}" == --enable-docker-monitoring ]]; then
+    "${compose[@]}" exec -T bot python - <<'PY'
 import asyncio
 from app.core.config import get_settings
 from app.monitoring.docker.client import DockerMonitor
@@ -125,10 +162,4 @@ if not containers:
     raise SystemExit("Docker monitor returned no containers. Check: docker compose logs docker-monitor-proxy")
 print(f"Docker monitor found {len(containers)} local containers.")
 PY
-        fi
-        exit 0
-    fi
-    sleep 2
-done
-printf 'Bot is running but not ready. Use bash deploy.sh --logs.\n' >&2
-exit 1
+fi

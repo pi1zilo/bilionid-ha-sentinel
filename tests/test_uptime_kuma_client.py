@@ -5,6 +5,7 @@ Unit tests for Uptime Kuma monitoring client.
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
+from app.bot.formatters import format_uptime_kuma_view
 from app.monitoring.uptime_kuma.client import UptimeKumaClient
 
 
@@ -58,18 +59,26 @@ async def test_metrics_error_falls_back_to_status_page(slug, expected):
     page = MagicMock(status=200, json=AsyncMock(return_value={
         "heartbeatList": {"1": [{"status": 1}]},
     }))
-    contexts = [MagicMock(), MagicMock()]
-    for context, response in zip(contexts, [metrics, page]):
+    metadata = MagicMock(status=200, json=AsyncMock(return_value={
+        "publicGroupList": [{"monitorList": [
+            {"id": 1, "name": "Weather Bot", "tags": [{"name": "Suslik"}]},
+        ]}],
+    }))
+    contexts = [MagicMock(), MagicMock(), MagicMock()]
+    for context, response in zip(contexts, [metrics, page, metadata]):
         context.__aenter__.return_value = response
     session.get.side_effect = contexts
 
     with patch("aiohttp.ClientSession") as client_session:
         client_session.return_value.__aenter__.return_value = session
-        overview = await client.get_overview()
+        overview = await client.get_overview(include_tags=True)
 
     assert overview.available
     assert overview.up_count == 1
-    assert session.get.call_args.args[0] == f"http://kuma/api/status-page/heartbeat/{expected}"
+    assert session.get.call_args_list[1].args[0] == f"http://kuma/api/status-page/heartbeat/{expected}"
+    assert session.get.call_args_list[2].args[0] == f"http://kuma/api/status-page/{expected}"
+    assert overview.monitors[0].name == "Weather Bot"
+    assert overview.monitors[0].tags == ["Suslik"]
 
 
 def test_metrics_keep_distinct_monitors_with_the_same_name():
@@ -79,3 +88,40 @@ def test_metrics_keep_distinct_monitors_with_the_same_name():
     )
     assert sorted(m.status for m in monitors) == ["DOWN", "MAINTENANCE"]
     assert len({m.id for m in monitors}) == 2
+
+
+@pytest.mark.asyncio
+async def test_overview_uses_exact_tags_by_id_and_keeps_monitors_outside_status_page():
+    client = UptimeKumaClient(base_url="http://kuma")
+    session = MagicMock()
+    metrics_context = MagicMock()
+    metrics_context.__aenter__.return_value = MagicMock(status=200, text=AsyncMock(return_value=(
+        'monitor_status{monitor_id="1",monitor_name="bot",monitor_type="docker",Server="Suslik"} 1\n'
+        'monitor_status{monitor_id="2",monitor_name="bot",monitor_type="docker",Server="Bili"} 0\n'
+        'monitor_status{monitor_name="legacy",monitor_type="http"} 1\n'
+        'monitor_status{monitor_name="bot",monitor_type="docker"} 1\n'
+        'monitor_status{monitor_id="4",monitor_name="metrics-only",Server="Bili,Suslik",Docker=""} 1\n'
+        'monitor_response_time{monitor_id="1",monitor_name="bot",monitor_type="docker",Server="Suslik"} -1\n'
+    )))
+    metadata_context = MagicMock()
+    metadata_context.__aenter__.return_value = MagicMock(status=200, json=AsyncMock(return_value={
+        "publicGroupList": [{"monitorList": [
+            {"id": 2, "name": "bot", "tags": [{"name": "Сервер", "value": "Bili"}]},
+            {"id": 1, "name": "bot", "tags": [{"name": "Сервер", "value": "Suslik VPS"}]},
+            {"id": 3, "name": "legacy", "tags": [{"name": "Legacy"}]},
+        ]}],
+    }))
+    session.get.side_effect = [metrics_context, metadata_context]
+
+    with patch("aiohttp.ClientSession") as client_session:
+        client_session.return_value.__aenter__.return_value = session
+        overview = await client.get_overview(include_tags=True)
+
+    assert overview.total_count == 5
+    assert format_uptime_kuma_view(overview).splitlines()[3:] == [
+        "• bot: UP · 🏷 Сервер: Suslik VPS",
+        "• bot: DOWN · 🏷 Сервер: Bili",
+        "• legacy: UP · 🏷 Legacy",
+        "• bot: UP",
+        "• metrics-only: UP · 🏷 Server: Bili, Server: Suslik, Docker",
+    ]

@@ -58,7 +58,7 @@ async def cmd_beszel(message: types.Message, collector: MetricsCollector) -> Non
 
 @router.message(Command("uptime"))
 async def cmd_uptime(message: types.Message, collector: MetricsCollector) -> None:
-    overview = await collector.get_uptime_kuma()
+    overview = await collector.get_uptime_kuma(include_tags=True)
     text = format_uptime_kuma_view(overview)
     await message.answer(text, reply_markup=back_to_menu_keyboard("nav_uptime"), parse_mode=None)
 
@@ -87,7 +87,7 @@ async def cb_beszel(callback: types.CallbackQuery, collector: MetricsCollector) 
 
 @router.callback_query(lambda c: c.data == "nav_uptime")
 async def cb_uptime(callback: types.CallbackQuery, collector: MetricsCollector) -> None:
-    overview = await collector.get_uptime_kuma()
+    overview = await collector.get_uptime_kuma(include_tags=True)
     text = format_uptime_kuma_view(overview)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=back_to_menu_keyboard("nav_uptime"), parse_mode=None)

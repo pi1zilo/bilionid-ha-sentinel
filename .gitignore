@@ -4,6 +4,7 @@
 .env.*
 !.env.example
 bilionid-*-backup-*.tar.gz
+/.deploy.lock
 
 # Python & Virtualenv
 __pycache__/

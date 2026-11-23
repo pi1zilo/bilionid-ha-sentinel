@@ -142,9 +142,9 @@ class MetricsCollector:
 
         return results
 
-    async def get_uptime_kuma(self) -> UptimeKumaOverview:
+    async def get_uptime_kuma(self, *, include_tags: bool = False) -> UptimeKumaOverview:
         """Returns Uptime Kuma monitors."""
-        return await self.uptime_kuma.get_overview()
+        return await self.uptime_kuma.get_overview(include_tags=include_tags)
 
     async def get_peer_incidents(self) -> list[dict] | None:
         peer_url = f"{self.settings.peer_ha_url}/ha/incidents"

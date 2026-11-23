@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections import Counter
 from urllib.parse import quote
 
 import aiohttp
@@ -11,6 +12,9 @@ from app.monitoring.models import UptimeKumaMonitor, UptimeKumaOverview
 
 logger = logging.getLogger("bilionid_ha.uptime_kuma")
 MONITOR_STATES = {0: "DOWN", 1: "UP", 2: "PENDING", 3: "MAINTENANCE"}
+METRIC_MONITOR_LABELS = {
+    "monitor_id", "monitor_name", "monitor_type", "monitor_url", "monitor_hostname", "monitor_port",
+}
 
 
 class UptimeKumaClient:
@@ -32,35 +36,83 @@ class UptimeKumaClient:
         if not self.auth and username and password:
             self.auth = aiohttp.BasicAuth(username, password)
 
-    async def get_overview(self) -> UptimeKumaOverview:
+    async def get_overview(self, *, include_tags: bool = False) -> UptimeKumaOverview:
         if not self.enabled:
             return UptimeKumaOverview(
                 available=False, state="DISABLED", error_message="Интеграция Uptime Kuma отключена."
             )
 
         reason = "Uptime Kuma не отвечает."
+        slug = quote(self.status_page_slug, safe="")
+        monitors = None
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             try:
                 async with session.get(
                     f"{self.base_url}/metrics", auth=self.auth, allow_redirects=False
                 ) as response:
                     if response.status == 200:
-                        return self._overview(self._parse_prometheus_metrics(await response.text()))
-                    reason = f"Uptime Kuma /metrics вернул HTTP {response.status}."
+                        monitors = self._parse_prometheus_metrics(await response.text())
+                    else:
+                        reason = f"Uptime Kuma /metrics вернул HTTP {response.status}."
             except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
                 logger.debug("Kuma metrics: %s", type(exc).__name__)
 
-            slug = quote(self.status_page_slug, safe="")
-            try:
-                async with session.get(
-                    f"{self.base_url}/api/status-page/heartbeat/{slug}", allow_redirects=False
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return self._overview(self._parse_status_page_heartbeats(data))
-            except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
-                logger.debug("Kuma status page: %s", type(exc).__name__)
+            from_heartbeats = monitors is None
+            if from_heartbeats:
+                try:
+                    async with session.get(
+                        f"{self.base_url}/api/status-page/heartbeat/{slug}", allow_redirects=False
+                    ) as response:
+                        if response.status == 200:
+                            monitors = self._parse_status_page_heartbeats(await response.json())
+                except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+                    logger.debug("Kuma status page: %s", type(exc).__name__)
+
+            if monitors is not None:
+                if include_tags and monitors:
+                    await self._apply_status_page_metadata(session, slug, monitors, from_heartbeats)
+                return self._overview(monitors)
         return UptimeKumaOverview(available=False, state="UNKNOWN", error_message=reason)
+
+    async def _apply_status_page_metadata(
+        self, session: aiohttp.ClientSession, slug: str,
+        monitors: list[UptimeKumaMonitor], from_heartbeats: bool,
+    ) -> None:
+        try:
+            async with session.get(f"{self.base_url}/api/status-page/{slug}", allow_redirects=False) as response:
+                if response.status != 200:
+                    return
+                data = await response.json()
+            by_id = {
+                str(monitor["id"]): monitor
+                for group in data["publicGroupList"]
+                for monitor in group["monitorList"]
+            }
+            by_name = {monitor["name"]: monitor for monitor in by_id.values()}
+            page_name_counts = Counter(monitor["name"] for monitor in by_id.values())
+        except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+            logger.debug("Kuma status page metadata: %s", type(exc).__name__)
+            return
+
+        monitor_name_counts = Counter(monitor.name for monitor in monitors)
+        for monitor in monitors:
+            metadata = by_id.get(monitor.id)
+            # Older Kuma exporters do not include monitor_id. Match only unambiguous names.
+            if (
+                not monitor.id.isdecimal()
+                and monitor_name_counts[monitor.name] == page_name_counts[monitor.name] == 1
+            ):
+                metadata = by_name[monitor.name]
+            if metadata is None:
+                continue
+            if from_heartbeats:
+                monitor.name = metadata["name"]
+            tags = metadata.get("tags")
+            if isinstance(tags, list):
+                monitor.tags = [
+                    f"{tag['name']}: {tag['value']}" if tag.get("value") else tag["name"]
+                    for tag in tags if isinstance(tag, dict) and tag.get("name")
+                ]
 
     @staticmethod
     def _overview(monitors: list[UptimeKumaMonitor]) -> UptimeKumaOverview:
@@ -92,6 +144,12 @@ class UptimeKumaClient:
                 )
                 if sample.name == "monitor_status":
                     record.status = MONITOR_STATES.get(sample.value, "UNKNOWN")
+                    # Kuma exports each tag as a label with comma-separated values.
+                    record.tags = [
+                        f"{label}: {tag_value}" if tag_value else label
+                        for label, value in sample.labels.items() if label not in METRIC_MONITOR_LABELS
+                        for tag_value in value.split(",")
+                    ]
                 elif float("-inf") < sample.value < float("inf"):
                     record.ping_ms = round(sample.value, 1)
         # Kuma's exporter uses the same labels for both series. Some old snapshots

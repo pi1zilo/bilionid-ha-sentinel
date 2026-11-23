@@ -100,8 +100,9 @@ def format_uptime_kuma_view(overview: UptimeKumaOverview) -> str:
         return overview.error_message or "Нет данных Uptime Kuma."
     lines = ["⏱ Uptime Kuma", f"Всего {overview.total_count} · UP {overview.up_count} · DOWN {overview.down_count}", ""]
     for monitor in overview.monitors:
-        latency = f" · {monitor.ping_ms:g} мс" if monitor.ping_ms is not None else ""
-        lines.append(f"• {monitor.name}: {monitor.status}{latency}")
+        latency = f" · {monitor.ping_ms:g} мс" if monitor.ping_ms is not None and monitor.ping_ms >= 0 else ""
+        tags = f" · 🏷 {', '.join(monitor.tags)}" if monitor.tags else ""
+        lines.append(f"• {monitor.name}: {monitor.status}{latency}{tags}")
     return "\n".join(lines)[:3800]
 
 
