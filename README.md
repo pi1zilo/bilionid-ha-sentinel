@@ -4,6 +4,8 @@
 
 Проект обеспечивает непрерывный мониторинг состояния серверов, телеметрии Beszel, статуса мониторов Uptime Kuma и Docker-контейнеров с автоматическим переключением между основным сервером (**Main / Primary**) и резервным сервером (**Backup / Standby**) по защищенной приватной сети **Tailscale**.
 
+Исходная версия Sentinel сохранена в ветке `sentinel-v1`. [BilioniD HA Bot с журналом VPS и ручным переключением](https://github.com/pi1zilo/bilionid-ha-sentinel/tree/main) и [BilioniD HA Unified с координацией переключения через Backup](https://github.com/pi1zilo/bilionid-ha-sentinel/tree/unified) доступны со своими инструкциями.
+
 ---
 
 ## 📋 Содержание
@@ -51,7 +53,8 @@
   - При аварии Main резервный узел Backup через 30 секунд принимает управление на себя.
   - При восстановлении Main управление автоматически возвращается на основной сервер через 30 секунд непрерывной стабильности.
   - Строгая защита от конфликта одновременного polling (Telegram 409 Conflict Fencing).
-- 🚨 **Оповещения в Telegram:** мгновенные уведомления об авариях, переключениях роли, восстановлении узлов и инцидентах.
+- 🚨 **Оповещения в Telegram:** уведомления об авариях, переключениях роли и восстановлении узлов. На активном узле `AlertWatcher` проверяет состояние серверов и контейнеров каждые 15 секунд, сообщает о сбоях и восстановлении, а также о критической нагрузке CPU, памяти и диска.
+- 💬 **Меню команд Telegram:** при запуске polling бот регистрирует список команд и кнопку меню. Команды также доступны из `/start` и `/help`.
 - 🔒 **Строгая безопасность:** доступ разрешен только указанному `TELEGRAM_ADMIN_USER_ID`, маскирование секретов в логах, rate limiting, работа в контейнере без root-прав.
 
 ---
@@ -97,7 +100,7 @@
 
 2. Склонируйте репозиторий и перейдите в директорию проекта:
    ```bash
-   git clone git@github.com:pi1zilo/bilionid-ha-sentinel.git
+   git clone --branch sentinel-v1 --single-branch https://github.com/pi1zilo/bilionid-ha-sentinel.git
    cd bilionid-ha-sentinel
    ```
 
@@ -136,7 +139,7 @@
 
 2. Склонируйте репозиторий на резервный сервер и перейдите в него:
    ```bash
-   git clone git@github.com:pi1zilo/bilionid-ha-sentinel.git
+   git clone --branch sentinel-v1 --single-branch https://github.com/pi1zilo/bilionid-ha-sentinel.git
    cd bilionid-ha-sentinel
    ```
 
